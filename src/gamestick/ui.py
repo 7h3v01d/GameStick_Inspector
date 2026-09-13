@@ -33,7 +33,7 @@ from .probe import find_candidate_volumes, inspect_volume
 from .reporting import write_evidence_bundle, write_probe_report
 from .windows_privilege import is_process_elevated, relaunch_current_app_elevated
 
-VERSION = "0.3.4-alpha2"
+VERSION = "0.3.4-alpha3"
 _BROWSER_PER_DIRECTORY_LIMIT = 1000
 _BROWSER_TOTAL_NODE_LIMIT = 5000
 
@@ -346,6 +346,13 @@ class BrowserTab(QWidget):
         try:
             listing = safe_browser_listing(root, path, limit=per_directory_limit)
         except (OSError, ForensicPathError):
+            return
+
+        if listing.error is not None:
+            QTreeWidgetItem(
+                parent,
+                [f"[unable to enumerate directory: {listing.error}]", "filesystem error"],
+            )
             return
 
         for child in listing.entries:

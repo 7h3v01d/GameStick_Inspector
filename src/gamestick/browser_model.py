@@ -28,6 +28,7 @@ class BrowserListing:
     truncated: bool
     entries_enumerated: int
     limit: int
+    error: str | None = None
 
 
 def safe_browser_listing(root: Path, directory: Path, limit: int = 1000) -> BrowserListing:
@@ -44,6 +45,7 @@ def safe_browser_listing(root: Path, directory: Path, limit: int = 1000) -> Brow
             truncated=False,
             entries_enumerated=sampled.enumerated,
             limit=limit,
+            error=str(sampled.error),
         )
 
     results: List[BrowserEntry] = []

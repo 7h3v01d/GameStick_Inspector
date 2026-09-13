@@ -1,22 +1,26 @@
-# GameStick Inspector 0.3.4-alpha2
+# GameStick Inspector 0.3.4-alpha3
 
 Safety-first GameStick SD-card inspector and **verified-transfer** full-card imager.
 
 The original prototype treated a GameStick as a mounted collection of files. This rebuild treats it as a **bootable block device plus firmware-specific filesystems and launcher metadata**.
 
-## 0.3.4-alpha2 — bounded/streaming enumeration
+## 0.3.4-alpha3 — bounded auto-detection and truthful Browser errors
 
-This is the first post-freeze hardening branch after the 0.3.3-alpha5 PASS/FREEZE baseline. It addresses the reviewer's medium robustness finding that previous limits bounded output/processing but could still enumerate and sort an entire hostile directory first.
+This post-freeze hardening branch keeps the 0.3.3-alpha5 PASS/FREEZE recovery-imaging architecture unchanged while completing the bounded-enumeration model across user-reachable Auto-detect paths.
 
-Directory traversal now uses a central streaming `bounded_scandir_names()` primitive. A requested sample of `N` entries performs at most `N + 1` directory-iterator advances; the extra operation is only an end/truncation/error probe. Mid-enumeration filesystem errors preserve and charge that partial work instead of losing it. Only a complete bounded sample is trusted and sorted.
+Directory traversal uses the central streaming `bounded_scandir_names()` primitive. A requested sample of `N` entries performs at most `N + 1` iterator advances; mid-enumeration filesystem errors preserve and charge partial work, and incomplete samples are not trusted as evidence.
 
-Applied boundaries include:
+Applied boundaries now include:
 
-- Browser: 1,000 entries per directory plus a 5,000-node whole-tree budget;
+- Browser: 1,000 entries per directory plus a 5,000-node whole-tree budget; corrupt enumeration is surfaced explicitly rather than presented as an empty directory;
 - directory snapshots: 500 entries per directory;
 - top-level snapshot discovery: at most 2,048 root entries and 32 snapshot directories;
 - metadata discovery: at most 4,097 iterator advances for one directory sample and 20,000 directory-enumeration operations globally;
-- root evidence/profile discovery: bounded top-level samples rather than exhaustive `list(os.scandir(...))`.
+- root evidence/profile discovery: bounded top-level samples;
+- Linux Auto-detect: actual mount points from `/proc/self/mountinfo`, at most 2,048 mount-table lines and at most 512 candidate/profile probes;
+- Linux no-`/proc` fallback: no recursive `os.walk()`, at most 4,096 directory-enumeration operations globally;
+- macOS Auto-detect: bounded `/Volumes` sampling (512 retained entries, at most 513 iterator advances);
+- Auto-detect globally profiles at most 512 unique candidate roots.
 
 A truncated sample is reported as truncated. It is deliberately **not** described as a complete lexicographic census: exhaustive global ordering would require enumerating the entire untrusted directory and would defeat the robustness boundary.
 
@@ -165,6 +169,6 @@ Runtime/dev dependencies are pinned in `requirements.txt` / `requirements-dev.tx
 
 ## Validation
 
-Current suite: **109/109 passing** before the final packaging audit.
+Current suite: **118/118 passing** before the final packaging audit.
 
 See `docs/SAFETY.md`, `docs/DESIGN.md` and `docs/ROADMAP.md`.

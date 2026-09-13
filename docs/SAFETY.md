@@ -1,7 +1,7 @@
 
 ## Bounded directory enumeration (0.3.4 branch)
 
-All untrusted GameStick directory enumeration is streaming and capped before full materialization. A sample limit of `N` consumes at most `N + 1` entries, with the extra record used only to detect truncation. This prevents a pathological directory from forcing an unbounded `list(os.scandir())` allocation before a display/scan limit is applied. Bounded samples are sorted only after capture and may therefore represent a filesystem-order sample rather than the global lexicographic first `N` names.
+All untrusted GameStick directory enumeration is streaming and capped before full materialization. A sample limit of `N` consumes at most `N + 1` iterator advances, with the extra operation used only to detect truncation/end/error. This prevents a pathological directory from forcing an unbounded `list(os.scandir())` allocation before a display/scan limit is applied. Bounded samples are sorted only after capture and may therefore represent a filesystem-order sample rather than the global lexicographic first `N` names. User-reachable Auto-detect is bounded as well: Linux consumes a capped `/proc/self/mountinfo` stream instead of recursively walking mount trees, its fallback has a global enumeration budget, macOS `/Volumes` uses bounded scandir, and at most 512 unique candidates are profile-probed.
 
 # Safety Model
 

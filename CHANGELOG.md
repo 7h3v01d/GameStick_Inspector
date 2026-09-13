@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.4-alpha3 — Bounded cross-platform auto-detection
+
+- Replaced Linux recursive `/media` / `/run/media` / `/mnt` auto-detect walking with bounded parsing of actual mount points from `/proc/self/mountinfo`.
+- Linux mount-table input is capped at 2,048 lines and Auto-detect profiles at most 512 unique candidate roots.
+- Added a no-`/proc` Linux fallback that is shallow, non-recursive, reparse-safe and globally capped at 4,096 directory-enumeration operations.
+- Replaced unbounded macOS `/Volumes` iteration with the central bounded scandir primitive.
+- Added a global defence-in-depth Auto-detect candidate/profile cap.
+- Browser listings now preserve enumeration failures in `BrowserListing.error`; the GUI shows an explicit filesystem-error marker instead of presenting a corrupt/unreadable directory as empty.
+- Added hostile 10,000-mount/candidate regressions and Browser corruption truthfulness coverage.
+- Frozen 0.3.3-alpha5 raw-imaging/output safety files remain unchanged.
+- **118/118 automated tests passing** before final packaging audit.
+
 ## 0.3.4-alpha2 — Corrupt-enumeration budget accounting
 
 - Preserves directory-enumeration accounting when `os.scandir()` fails mid-stream.

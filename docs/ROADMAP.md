@@ -7,7 +7,7 @@
 - [x] Windows physical disk + partition mapping
 - [x] evidence-backed profile scoring
 - [x] bounded metadata/schema inspection
-- [x] genuinely bounded/streaming directory enumeration (0.3.4-alpha1)
+- [x] genuinely bounded/streaming directory enumeration + cross-platform Auto-detect budgets (0.3.4-alpha3)
 - [x] privacy-bounded JSON/evidence ZIP exports
 - [x] prevent generated output on any partition of the source physical disk
 - [x] fail closed on stale/unknown source identity before generated output

@@ -9,10 +9,10 @@ def test_release_version_metadata_is_consistent():
     ui = (root / "src" / "gamestick" / "ui.py").read_text(encoding="utf-8")
     readme = (root / "README.md").read_text(encoding="utf-8")
 
-    assert gamestick.__version__ == "0.3.4-alpha2"
-    assert 'version = "0.3.4a2"' in pyproject
-    assert 'VERSION = "0.3.4-alpha2"' in ui
-    assert readme.startswith("# GameStick Inspector 0.3.4-alpha2")
+    assert gamestick.__version__ == "0.3.4-alpha3"
+    assert 'version = "0.3.4a3"' in pyproject
+    assert 'VERSION = "0.3.4-alpha3"' in ui
+    assert readme.startswith("# GameStick Inspector 0.3.4-alpha3")
 
 
 def test_release_archive_tree_contains_no_executable_legacy_directory():

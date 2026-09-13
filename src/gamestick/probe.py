@@ -13,6 +13,7 @@ import stat
 import string
 import subprocess
 from collections import Counter
+from itertools import islice
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
@@ -31,7 +32,7 @@ from .models import (
     PhysicalMapping,
     ProbeReport,
 )
-from .profiles import best_profile_from_matches, profile_matches
+from .profiles import best_profile, best_profile_from_matches, profile_matches
 from .safety import assert_readable_root
 
 _ARTIFACT_SUFFIXES = {
@@ -52,6 +53,18 @@ _MAX_SNAPSHOT_DIRS = 32
 _MAX_TOP_LEVEL_SNAPSHOT_ENUM_ENTRIES = 2_048
 _MAX_SNAPSHOT_ENTRIES = 500
 _MAX_ANALYSIS_BYTES = 2 * 1024 * 1024
+
+# Auto-detection is user reachable and must obey the same hostile-media
+# robustness model as an already-selected GameStick. Linux primarily consumes
+# the kernel mount table rather than recursively walking arbitrary mount trees.
+_MAX_AUTO_DETECT_CANDIDATES = 512
+_MAX_LINUX_MOUNTINFO_LINES = 2_048
+_MAX_LINUX_FALLBACK_ENUMERATED_ENTRIES = 4_096
+_MAX_LINUX_FALLBACK_ENTRIES_PER_DIRECTORY = 256
+_MAX_MACOS_VOLUME_ENTRIES = 512
+_LINUX_MOUNT_BASES = (Path("/media"), Path("/run/media"), Path("/mnt"))
+_MACOS_VOLUMES_ROOT = Path("/Volumes")
+
 _ROM_LIKE_DIRS = {"rom", "roms", "games"}
 _TEXT_CONFIG_SUFFIXES = {".ini", ".cfg", ".conf"}
 
@@ -837,14 +850,170 @@ def inspect_volume(path: str | Path) -> ProbeReport:
             "max_top_level_snapshot_enumeration": _MAX_TOP_LEVEL_SNAPSHOT_ENUM_ENTRIES,
             "max_snapshot_entries_per_directory": _MAX_SNAPSHOT_ENTRIES,
             "directory_enumeration_is_bounded": True,
+            "max_auto_detect_candidates": _MAX_AUTO_DETECT_CANDIDATES,
+            "max_linux_mountinfo_lines": _MAX_LINUX_MOUNTINFO_LINES,
+            "max_linux_fallback_enumerated_entries": _MAX_LINUX_FALLBACK_ENUMERATED_ENTRIES,
+            "max_macos_volume_entries": _MAX_MACOS_VOLUME_ENTRIES,
             "max_hashed_artifact_bytes": _MAX_HASH_BYTES,
         },
     )
 
 
+def _decode_linux_mountinfo_path(value: str) -> str:
+    """Decode the octal escapes used in /proc/*/mountinfo path fields."""
+    return re.sub(
+        r"\\([0-7]{3})",
+        lambda match: chr(int(match.group(1), 8)),
+        value,
+    )
+
+
+def _linux_mountinfo_lines() -> Iterable[str]:
+    """Yield a bounded number of mountinfo lines from the current mount namespace."""
+    with Path("/proc/self/mountinfo").open("r", encoding="utf-8", errors="replace") as handle:
+        yield from islice(handle, _MAX_LINUX_MOUNTINFO_LINES)
+
+
+def _linux_mount_is_candidate(path: Path) -> bool:
+    """Preserve the old /media,/run/media,/mnt discovery scope without walking it."""
+    lexical = Path(os.path.abspath(os.fspath(path)))
+    for base in _LINUX_MOUNT_BASES:
+        base_abs = Path(os.path.abspath(os.fspath(base)))
+        try:
+            relative = lexical.relative_to(base_abs)
+        except ValueError:
+            continue
+        # The old walker yielded levels one and two below each mount base.
+        depth = len(relative.parts)
+        if 1 <= depth <= 2:
+            return True
+    return False
+
+
+def _iter_linux_mountinfo_roots() -> Iterable[Path]:
+    yielded = 0
+    seen: set[str] = set()
+    for line in _linux_mountinfo_lines():
+        fields = line.rstrip("\n").split()
+        if len(fields) < 6:
+            continue
+        mount_point = Path(_decode_linux_mountinfo_path(fields[4]))
+        if not _linux_mount_is_candidate(mount_point):
+            continue
+        key = os.path.normcase(os.path.abspath(os.fspath(mount_point)))
+        if key in seen:
+            continue
+        seen.add(key)
+        yield mount_point
+        yielded += 1
+        if yielded >= _MAX_AUTO_DETECT_CANDIDATES:
+            break
+
+
+def _iter_linux_fallback_roots() -> Iterable[Path]:
+    """Bounded fallback for Linux environments without /proc/self/mountinfo.
+
+    No recursive os.walk() is used. Enumeration work across all three historical
+    mount bases shares one hard global iterator-operation budget.
+    """
+    remaining_ops = _MAX_LINUX_FALLBACK_ENUMERATED_ENTRIES
+    yielded = 0
+    seen: set[str] = set()
+
+    for base in _LINUX_MOUNT_BASES:
+        if remaining_ops <= 1 or yielded >= _MAX_AUTO_DETECT_CANDIDATES:
+            break
+        try:
+            safe_base = assert_contained_non_reparse(base, base)
+        except (OSError, ForensicPathError):
+            continue
+
+        first_limit = min(_MAX_LINUX_FALLBACK_ENTRIES_PER_DIRECTORY, remaining_ops - 1)
+        first = bounded_scandir_names(safe_base, first_limit)
+        remaining_ops -= first.enumerated
+        if first.error is not None:
+            continue
+
+        for first_name in first.names:
+            if yielded >= _MAX_AUTO_DETECT_CANDIDATES or remaining_ops <= 1:
+                break
+            first_path = safe_base / first_name
+            try:
+                safe_first = assert_contained_non_reparse(safe_base, first_path)
+                first_st = lstat_non_reparse(safe_first)
+            except (OSError, ForensicPathError):
+                continue
+            if not stat.S_ISDIR(first_st.st_mode):
+                continue
+
+            key = os.path.normcase(os.path.abspath(os.fspath(safe_first)))
+            if key not in seen:
+                seen.add(key)
+                yield safe_first
+                yielded += 1
+                if yielded >= _MAX_AUTO_DETECT_CANDIDATES:
+                    break
+
+            second_limit = min(_MAX_LINUX_FALLBACK_ENTRIES_PER_DIRECTORY, remaining_ops - 1)
+            if second_limit < 0:
+                break
+            second = bounded_scandir_names(safe_first, second_limit)
+            remaining_ops -= second.enumerated
+            if second.error is not None:
+                continue
+            for second_name in second.names:
+                if yielded >= _MAX_AUTO_DETECT_CANDIDATES:
+                    break
+                second_path = safe_first / second_name
+                try:
+                    safe_second = assert_contained_non_reparse(safe_base, second_path)
+                    second_st = lstat_non_reparse(safe_second)
+                except (OSError, ForensicPathError):
+                    continue
+                if not stat.S_ISDIR(second_st.st_mode):
+                    continue
+                key = os.path.normcase(os.path.abspath(os.fspath(safe_second)))
+                if key in seen:
+                    continue
+                seen.add(key)
+                yield safe_second
+                yielded += 1
+
+
+def _iter_macos_volume_roots() -> Iterable[Path]:
+    base = _MACOS_VOLUMES_ROOT
+    try:
+        safe_base = assert_contained_non_reparse(base, base)
+        sampled = bounded_scandir_names(
+            safe_base,
+            min(_MAX_MACOS_VOLUME_ENTRIES, _MAX_AUTO_DETECT_CANDIDATES),
+        )
+    except (OSError, ForensicPathError):
+        return
+    if sampled.error is not None:
+        return
+
+    yielded = 0
+    for name in sampled.names:
+        if yielded >= _MAX_AUTO_DETECT_CANDIDATES:
+            break
+        child = safe_base / name
+        try:
+            safe_child = assert_contained_non_reparse(safe_base, child)
+            st = lstat_non_reparse(safe_child)
+        except (OSError, ForensicPathError):
+            continue
+        if not stat.S_ISDIR(st.st_mode):
+            continue
+        yield safe_child
+        yielded += 1
+
+
 def iter_mount_roots() -> Iterable[Path]:
+    """Yield bounded candidate mount roots without recursive hostile-tree walking."""
     system = platform.system()
     if system == "Windows":
+        # Windows drive-letter discovery is intrinsically bounded to 26 letters.
         try:
             mask = __import__("ctypes").windll.kernel32.GetLogicalDrives()
             for index, letter in enumerate(string.ascii_uppercase):
@@ -856,34 +1025,29 @@ def iter_mount_roots() -> Iterable[Path]:
                 if root.exists():
                     yield root
     elif system == "Darwin":
-        base = Path("/Volumes")
-        if base.exists():
-            yield from (p for p in base.iterdir() if p.is_dir())
+        yield from _iter_macos_volume_roots()
     else:
-        for base in (Path("/media"), Path("/run/media"), Path("/mnt")):
-            if not base.exists():
-                continue
-            for current, dirs, _ in os.walk(base):
-                current_path = Path(current)
-                depth = len(current_path.relative_to(base).parts)
-                if depth > 2:
-                    dirs[:] = []
-                    continue
-                if current_path != base:
-                    yield current_path
+        try:
+            yield from _iter_linux_mountinfo_roots()
+        except OSError:
+            # Some minimal/non-proc environments still need discovery, but the
+            # fallback is explicitly shallow and globally budgeted.
+            yield from _iter_linux_fallback_roots()
 
 
 def find_candidate_volumes(min_score: int = 40) -> List[tuple[Path, object]]:
+    """Profile at most the configured number of unique auto-detect candidates."""
     candidates = []
     seen = set()
-    for root in iter_mount_roots():
-        try:
-            resolved = str(root.resolve())
-        except OSError:
-            resolved = str(root)
-        if resolved in seen:
+    profile_probes = 0
+    for root in islice(iter_mount_roots(), _MAX_AUTO_DETECT_CANDIDATES):
+        # Dedupe lexically; do not canonicalize an untrusted auto-detect root
+        # before the profile layer applies its non-reparse containment policy.
+        key = os.path.normcase(os.path.abspath(os.fspath(root)))
+        if key in seen:
             continue
-        seen.add(resolved)
+        seen.add(key)
+        profile_probes += 1
         try:
             match = best_profile(root)
             if match.score >= min_score:
@@ -891,7 +1055,7 @@ def find_candidate_volumes(min_score: int = 40) -> List[tuple[Path, object]]:
                 if mapping.is_boot is True or mapping.is_system is True:
                     continue
                 candidates.append((root, match))
-        except (OSError, PermissionError):
+        except (OSError, PermissionError, ForensicPathError):
             continue
     candidates.sort(key=lambda pair: pair[1].score, reverse=True)
     return candidates

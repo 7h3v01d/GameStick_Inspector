@@ -350,3 +350,31 @@ def test_metadata_does_not_process_partial_names_from_corrupt_directory(monkeypa
 
     assert artifacts == []
     assert any("Could not enumerate" in warning for warning in warnings)
+
+
+def test_browser_listing_exposes_corrupt_enumeration_error(monkeypatch, tmp_path):
+    import gamestick.browser_model as browser_model
+
+    monkeypatch.setattr(
+        browser_model,
+        "bounded_scandir_names",
+        lambda _path, _limit: BoundedScandirResult(
+            names=[],
+            truncated=False,
+            enumerated=1,
+            error=OSError("corrupt directory"),
+        ),
+    )
+
+    listing = browser_model.safe_browser_listing(tmp_path, tmp_path, limit=1000)
+
+    assert listing.entries == []
+    assert listing.truncated is False
+    assert listing.entries_enumerated == 1
+    assert listing.error == "corrupt directory"
+
+
+def test_browser_ui_contains_visible_enumeration_error_marker():
+    root = Path(__file__).resolve().parents[1]
+    ui = (root / "src" / "gamestick" / "ui.py").read_text(encoding="utf-8")
+    assert "[unable to enumerate directory:" in ui
