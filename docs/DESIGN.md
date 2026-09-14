@@ -11,8 +11,8 @@ Host-visible files/directories. Corruption here must not invalidate already esta
 ### Layer 2 — evidence-backed GameStick profile
 Observed layout markers and launcher/index schemas; no unsupported chipset/firmware inference.
 
-### Layer 3 — consistency model (future)
-Read-only correlation between launcher records, ROM paths, artwork, BIOS/configuration and saves.
+### Layer 3 — launcher/content discovery and consistency model
+0.4.0 begins with read-only launcher/index candidate ranking and content-root discovery. Exact row/path correlation remains disabled until a real-card launcher format is confirmed.
 
 ### Layer 4 — transactional modification (future)
 Profile-specific, journalled, verified and rollback-capable writes.
@@ -22,7 +22,8 @@ Profile-specific, journalled, verified and rollback-capable writes.
 - `fs_safety.py` — non-following reparse/junction detection plus canonical forensic-root containment.
 - `browser_model.py` — reparse-safe read-only Browser enumeration shared with the GUI.
 - `probe.py` — corruption-tolerant, reparse-contained filesystem evidence plus Windows physical/partition mapping.
-- `profiles.py` — evidence-based profile matching.
+- `profiles.py` — evidence-based filesystem profile matching.
+- `discovery.py` — deterministic Device Profile candidate synthesis and launcher/content-root ranking from already-collected probe evidence; no extra traversal.
 - `models.py` — probe and acquisition data contracts.
 - `safety.py` — destructive lockout plus path and physical-destination invariants.
 - `imaging.py` — source identity binding, read-only raw acquisition, transfer verification and transactional image/manifest commit.

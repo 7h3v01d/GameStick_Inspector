@@ -44,8 +44,31 @@ def test_evidence_bundle_contains_only_generated_evidence(tmp_path):
             assert manifest["files"][name]["size"] == len(data)
             assert manifest["files"][name]["sha256"] == hashlib.sha256(data).hexdigest()
         payload = json.loads(archive.read("gamestick_probe.json"))
-        assert payload["schema_version"] == 3
+        assert payload["schema_version"] == 7
 
+
+
+
+def test_headerless_csv_private_values_absent_from_evidence_bundle(tmp_path):
+    card = tmp_path / "card"
+    card.mkdir()
+    for name in ("Roms", "cubegm", "image"):
+        (card / name).mkdir()
+    (card / "cubegm" / "game.csv").write_text(
+        "1,Secret Game Name,Roms/FC/secret.nes,image/secret.png\n"
+        "2,Other Game,Roms/FC/other.nes,image/other.png\n",
+        encoding="utf-8",
+    )
+    report = inspect_volume(card)
+    destination = tmp_path / "out" / "evidence.zip"
+    saved = write_evidence_bundle(report, destination)
+
+    with zipfile.ZipFile(saved) as archive:
+        payload = archive.read("gamestick_probe.json").decode("utf-8")
+    assert "Secret Game Name" not in payload
+    assert "Roms/FC/secret.nes" not in payload
+    assert "image/secret.png" not in payload
+    assert "header_fields" not in payload
 
 def test_probe_report_written_atomically(tmp_path):
     _, report = _report(tmp_path)
@@ -53,7 +76,7 @@ def test_probe_report_written_atomically(tmp_path):
     saved = write_probe_report(report, destination)
     assert saved.exists()
     assert not destination.with_suffix(".json.tmp").exists()
-    assert json.loads(saved.read_text(encoding="utf-8"))["schema_version"] == 3
+    assert json.loads(saved.read_text(encoding="utf-8"))["schema_version"] == 7
 
 
 def test_probe_report_refuses_preexisting_predictable_temp_symlink(tmp_path):
@@ -285,3 +308,36 @@ def test_source_revalidation_failure_reaches_no_temp_creation_primitive(tmp_path
         )
 
     assert calls == {"portable": 0, "bound": 0}
+
+
+def test_json_and_config_private_names_absent_from_evidence_bundle(tmp_path):
+    card = tmp_path / "card-private-structured"
+    card.mkdir()
+    for name in ("Roms", "cubegm", "image"):
+        (card / name).mkdir()
+    (card / "cubegm" / "games.json").write_text(
+        json.dumps({
+            "Secret Game Name": {"rom": "Roms/FC/secret.nes"},
+            "Roms/FC/private.nes": {"title": "Private Game"},
+        }),
+        encoding="utf-8",
+    )
+    (card / "cubegm" / "games.cfg").write_text(
+        "[Secret Config Game]\nRoms/FC/private.nes=value\n[launcher]\nrom_path=hidden\n",
+        encoding="utf-8",
+    )
+    report = inspect_volume(card)
+    saved = write_evidence_bundle(report, tmp_path / "out-private" / "evidence.zip")
+    with zipfile.ZipFile(saved) as archive:
+        payload = archive.read("gamestick_probe.json").decode("utf-8")
+    for forbidden in (
+        "Secret Game Name",
+        "Roms/FC/secret.nes",
+        "Roms/FC/private.nes",
+        "Private Game",
+        "Secret Config Game",
+        '"top_level_keys"',
+        '"sections"',
+        '"key_names"',
+    ):
+        assert forbidden not in payload

@@ -3,6 +3,12 @@
 
 All untrusted GameStick directory enumeration is streaming and capped before full materialization. A sample limit of `N` consumes at most `N + 1` iterator advances, with the extra operation used only to detect truncation/end/error. This prevents a pathological directory from forcing an unbounded `list(os.scandir())` allocation before a display/scan limit is applied. Bounded samples are sorted only after capture and may therefore represent a filesystem-order sample rather than the global lexicographic first `N` names. User-reachable Auto-detect is bounded as well: Linux consumes a capped `/proc/self/mountinfo` stream instead of recursively walking mount trees, its fallback has a global enumeration budget, macOS `/Volumes` uses bounded scandir, and at most 512 unique candidates are profile-probed.
 
+## Device Profile candidate synthesis (0.4.0)
+
+Device Profile and launcher/index ranking is derived entirely from evidence already collected by the bounded read-only probe. The discovery layer performs no additional filesystem traversal and does not read SQLite rows, CSV data rows, JSON values, or ROM filenames. It uses only structural evidence already present in the probe model: profile markers, candidate paths/formats, SQLite schema/table/column names, privacy-safe derived CSV structural terms, JSON key names, XML root names, config key names, bounded directory snapshots, and integrity hashes.
+
+The resulting profile is explicitly marked `CANDIDATE`. A high-ranked launcher artifact is evidence for further analysis, not authority to modify the card. Transactional GameStick writes remain disabled until a real-card launcher/index parser and consistency model are separately designed and reviewed.
+
 # Safety Model
 
 ## Primary invariant

@@ -33,7 +33,7 @@ from .probe import find_candidate_volumes, inspect_volume
 from .reporting import write_evidence_bundle, write_probe_report
 from .windows_privilege import is_process_elevated, relaunch_current_app_elevated
 
-VERSION = "0.3.4-alpha3"
+VERSION = "0.4.0-alpha4"
 _BROWSER_PER_DIRECTORY_LIMIT = 1000
 _BROWSER_TOTAL_NODE_LIMIT = 5000
 
@@ -126,7 +126,7 @@ class InspectorTab(QWidget):
         QMessageBox.information(
             self,
             "Candidate detected",
-            f"Selected {root}\nProfile: {match.display_name}\nConfidence score: {match.score}%",
+            f"Selected {root}\nProfile: {match.display_name}\nHeuristic score: {match.score}/100\nConfidence band: {match.confidence}",
         )
 
     def probe(self):
@@ -141,7 +141,7 @@ class InspectorTab(QWidget):
             f"Probe status: {report.probe_status}",
             f"Selected root: {report.selected_root}",
             f"Profile: {report.profile.display_name}",
-            f"Confidence: {report.profile.confidence} ({report.profile.score}%)",
+            f"Confidence band: {report.profile.confidence}   Heuristic score: {report.profile.score}/100",
             f"Volume size: {_fmt_bytes(report.volume_total)}   Free: {_fmt_bytes(report.volume_free)}",
             f"Filesystem: {mapping.filesystem or 'Unknown'}   Label: {mapping.filesystem_label or 'Unknown'}",
             f"Structure SHA-256: {report.structure_sha256}",
@@ -261,9 +261,24 @@ class StructureTab(QWidget):
         layout.addWidget(refresh)
 
         self.profiles = QTreeWidget()
-        self.profiles.setHeaderLabels(["Profile candidate", "Score", "Confidence", "Matched", "Missing"])
-        self.profiles.setMaximumHeight(180)
+        self.profiles.setHeaderLabels(["Profile candidate", "Heuristic score (/100)", "Confidence", "Matched", "Missing"])
+        self.profiles.setMaximumHeight(160)
         layout.addWidget(self.profiles)
+
+        self.device_profile = QTextEdit()
+        self.device_profile.setReadOnly(True)
+        self.device_profile.setMaximumHeight(145)
+        layout.addWidget(self.device_profile)
+
+        self.launchers = QTreeWidget()
+        self.launchers.setHeaderLabels(["Launcher/index candidate", "Format", "Heuristic score (/100)", "Confidence", "Roles", "Evidence"])
+        self.launchers.setMaximumHeight(190)
+        layout.addWidget(self.launchers)
+
+        self.content_roots = QTreeWidget()
+        self.content_roots.setHeaderLabels(["Content root", "Role", "Heuristic score (/100)", "Evidence"])
+        self.content_roots.setMaximumHeight(160)
+        layout.addWidget(self.content_roots)
 
         self.snapshots = QTreeWidget()
         self.snapshots.setHeaderLabels(["Directory", "Child directories", "File extensions", "Sampled", "Truncated", "Filenames redacted"])
@@ -286,6 +301,47 @@ class StructureTab(QWidget):
                     ", ".join(match.missing_markers),
                 ],
             )
+        discovery = report.device_profile_candidate
+        self.launchers.clear()
+        self.content_roots.clear()
+        if discovery is None:
+            self.device_profile.setPlainText("Device Profile candidate synthesis unavailable for this probe.")
+        else:
+            self.device_profile.setPlainText(
+                "\n".join([
+                    f"Device Profile candidate: {discovery.candidate_id}",
+                    f"Status: {discovery.status}",
+                    f"Base filesystem profile: {discovery.base_profile_id} (heuristic score {discovery.base_profile_score}/100)",
+                    f"Launcher resolution: {discovery.launcher_resolution}",
+                    f"Top launcher/index: {discovery.launcher_path or 'unresolved'}",
+                    f"Format: {discovery.launcher_format or 'unresolved'}   Confidence: {discovery.launcher_confidence}",
+                    f"Profile signature SHA-256: {discovery.profile_signature_sha256}",
+                    f"Observed ROM platform directories: {', '.join(discovery.platform_directories) or 'none in bounded evidence'}",
+                ])
+            )
+            for candidate in discovery.launcher_candidates:
+                QTreeWidgetItem(
+                    self.launchers,
+                    [
+                        candidate.path,
+                        candidate.format_name,
+                        str(candidate.score),
+                        candidate.confidence,
+                        ", ".join(candidate.role_hints),
+                        "; ".join(candidate.evidence),
+                    ],
+                )
+            for content_root in discovery.content_roots:
+                QTreeWidgetItem(
+                    self.content_roots,
+                    [
+                        content_root.path,
+                        content_root.role,
+                        str(content_root.score),
+                        "; ".join(content_root.evidence),
+                    ],
+                )
+
         self.snapshots.clear()
         for snapshot in report.directory_snapshots:
             ext_text = ", ".join(f"{key}:{value}" for key, value in snapshot.file_extension_counts.items())
@@ -301,6 +357,8 @@ class StructureTab(QWidget):
                 ],
             )
         self.profiles.resizeColumnToContents(0)
+        self.launchers.resizeColumnToContents(0)
+        self.content_roots.resizeColumnToContents(0)
         self.snapshots.resizeColumnToContents(0)
 
 
@@ -543,7 +601,7 @@ class RecoveryTab(QWidget):
             f"Latest probe: Disk {mapping.disk_number if mapping.disk_number is not None else '?'} — "
             f"{mapping.disk_name or 'Unknown'} — {_fmt_bytes(mapping.disk_size)} — "
             f"Bus {mapping.bus_type or 'Unknown'} — profile {report.profile.display_name} "
-            f"({report.profile.score}%)."
+            f"(heuristic score {report.profile.score}/100)."
         )
 
     def select_raw_destination(self):
@@ -613,7 +671,7 @@ class RecoveryTab(QWidget):
             f"Device: {plan.disk_name}\n"
             f"Capacity: {_fmt_bytes(plan.source_size)}\n"
             f"Bus: {mapping.bus_type or 'Unknown'}\n"
-            f"Profile: {report.profile.display_name} ({report.profile.score}%)\n"
+            f"Profile: {report.profile.display_name} (heuristic score {report.profile.score}/100)\n"
             f"Destination: {plan.destination}\n\n"
             f"Type exactly: {plan.confirmation_phrase}"
         )

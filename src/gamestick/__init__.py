@@ -1,3 +1,3 @@
 """GameStick Inspector — safety-first profiling and verified read-only imaging."""
 
-__version__ = "0.3.4-alpha3"
+__version__ = "0.4.0-alpha4"

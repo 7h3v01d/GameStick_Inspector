@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import io
 import hashlib
 import json
 import ntpath
@@ -12,6 +13,7 @@ import sqlite3
 import stat
 import string
 import subprocess
+import xml.etree.ElementTree as ET
 from collections import Counter
 from itertools import islice
 from datetime import datetime, timezone
@@ -19,12 +21,14 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 from urllib.parse import quote
 
+from .discovery import build_device_profile_candidate
 from .fs_safety import (
     ForensicPathError,
     assert_contained_non_reparse,
     bounded_scandir_names,
     lstat_non_reparse,
 )
+from .ordering import stable_text_key
 from .models import (
     CandidateArtifact,
     DirectorySnapshot,
@@ -68,6 +72,145 @@ _MACOS_VOLUMES_ROOT = Path("/Volumes")
 _ROM_LIKE_DIRS = {"rom", "roms", "games"}
 _TEXT_CONFIG_SUFFIXES = {".ini", ".cfg", ".conf"}
 
+# Names found inside media-supplied metadata are untrusted data until a real
+# device format is frozen. Default exported evidence never includes arbitrary
+# source names from CSV/JSON/config/XML/SQLite schema positions; only derived
+# allowlisted semantic terms and bounded counts are emitted.
+_STRUCTURAL_NAME_ALIASES = {
+    "id": ("id",),
+    "game": ("game",),
+    "games": ("game",),
+    "game_id": ("game", "id"),
+    "gameid": ("game", "id"),
+    "game_name": ("game", "title"),
+    "gamename": ("game", "title"),
+    "name": ("title",),
+    "title": ("title",),
+    "rom": ("rom",),
+    "roms": ("rom",),
+    "rom_file": ("rom", "file"),
+    "romfile": ("rom", "file"),
+    "rom_filename": ("rom", "filename"),
+    "romfilename": ("rom", "filename"),
+    "rom_path": ("rom", "path"),
+    "rompath": ("rom", "path"),
+    "path": ("path",),
+    "file": ("file",),
+    "filename": ("filename",),
+    "image": ("image",),
+    "images": ("image",),
+    "image_path": ("image", "path"),
+    "imagepath": ("image", "path"),
+    "cover": ("cover",),
+    "covers": ("cover",),
+    "cover_path": ("cover", "path"),
+    "coverpath": ("cover", "path"),
+    "boxart": ("boxart",),
+    "artwork": ("artwork",),
+    "preview": ("preview",),
+    "snap": ("snap",),
+    "system": ("system",),
+    "systems": ("system",),
+    "platform": ("platform",),
+    "platforms": ("platform",),
+    "console": ("platform",),
+    "emulator": ("emulator",),
+    "emulators": ("emulator",),
+    "launcher": ("launcher",),
+    "menu": ("launcher",),
+    "frontend": ("launcher",),
+    "index": ("index",),
+    "catalog": ("catalog",),
+    "library": ("library",),
+    "gamelist": ("gamelist",),
+}
+
+
+def _semantic_terms_for_name(value: object) -> tuple[str, ...]:
+    text = str(value).strip().casefold()
+    normalized = re.sub(r"[\s-]+", "_", text)
+    if not re.fullmatch(r"[a-z_][a-z0-9_]{0,63}", normalized):
+        return ()
+    return _STRUCTURAL_NAME_ALIASES.get(normalized, ())
+
+
+def _derived_semantics(values: Iterable[object], limit: int) -> tuple[List[str], int]:
+    terms: set[str] = set()
+    recognized = 0
+    for value in islice(values, limit):
+        mapped = _semantic_terms_for_name(value)
+        if mapped:
+            recognized += 1
+            terms.update(mapped)
+    return sorted(terms, key=stable_text_key), recognized
+
+
+def _sanitized_error_fields(prefix: str, exc: BaseException) -> Dict[str, Any]:
+    """Return privacy-bounded parser error evidence.
+
+    Dependency/library exception strings can contain media-controlled identifiers.
+    Evidence therefore records only the exception class plus bounded numeric/symbolic
+    codes that are not derived from source strings. Raw ``str(exc)`` stays local.
+    """
+    details: Dict[str, Any] = {
+        prefix: True,
+        f"{prefix}_type": type(exc).__name__,
+    }
+    if isinstance(exc, sqlite3.Error):
+        code = getattr(exc, "sqlite_errorcode", None)
+        name = getattr(exc, "sqlite_errorname", None)
+        if isinstance(code, int):
+            details[f"{prefix}_code"] = code
+        if isinstance(name, str) and re.fullmatch(r"SQLITE_[A-Z0-9_]+", name):
+            details[f"{prefix}_code_name"] = name
+    elif isinstance(exc, OSError):
+        if isinstance(exc.errno, int):
+            details[f"{prefix}_errno"] = exc.errno
+    elif isinstance(exc, json.JSONDecodeError):
+        details[f"{prefix}_line"] = int(exc.lineno)
+        details[f"{prefix}_column"] = int(exc.colno)
+    elif isinstance(exc, ET.ParseError):
+        position = getattr(exc, "position", None)
+        if isinstance(position, tuple) and len(position) == 2:
+            details[f"{prefix}_line"] = int(position[0])
+            details[f"{prefix}_column"] = int(position[1])
+        code = getattr(exc, "code", None)
+        if isinstance(code, int):
+            details[f"{prefix}_code"] = code
+    return details
+
+
+class _XMLRootFound(Exception):
+    def __init__(self, tag: object):
+        super().__init__("XML root found")
+        self.tag = tag
+
+
+class _FirstXMLStartTarget:
+    """ElementTree target that stops at the first real start-element event."""
+
+    def start(self, tag: object, attrs: Dict[str, object]) -> None:
+        del attrs
+        raise _XMLRootFound(tag)
+
+    def end(self, tag: object) -> None:
+        del tag
+
+    def data(self, data: str) -> None:
+        del data
+
+    def close(self) -> None:
+        return None
+
+
+def _xml_local_name(tag: object) -> str:
+    text = str(tag)
+    if "}" in text:
+        text = text.rsplit("}", 1)[-1]
+    if ":" in text:
+        text = text.rsplit(":", 1)[-1]
+    return text
+
 
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
@@ -89,7 +232,7 @@ def _root_entries(root: Path) -> tuple[List[Dict[str, object]], List[str]]:
                 f"Could not enumerate volume root {root} after "
                 f"{sampled.enumerated:,} enumeration operations: {sampled.error}"
             ]
-        names = sorted(sampled.names, key=str.casefold)
+        names = sorted(sampled.names, key=stable_text_key)
     except ForensicPathError as exc:
         return [], [f"Could not enumerate volume root {root}: {exc}"]
 
@@ -150,17 +293,45 @@ def _analyze_sqlite(path: Path) -> Dict[str, Any]:
                 "WHERE type IN ('table','view','index','trigger') "
                 "AND name NOT LIKE 'sqlite_%' ORDER BY type, name LIMIT 200"
             ).fetchall()
-            by_type: Dict[str, List[str]] = {}
-            for object_type, name in rows:
-                by_type.setdefault(str(object_type), []).append(str(name))
-            details["schema_objects"] = by_type
+            object_counts = Counter(str(object_type) for object_type, _ in rows)
+            schema_terms, recognized_schema_names = _derived_semantics(
+                (name for _, name in rows), 200
+            )
+            details["schema_object_counts"] = dict(sorted(object_counts.items(), key=lambda item: stable_text_key(item[0])))
             details["schema_object_count"] = len(rows)
+            details["recognized_schema_terms"] = schema_terms
+            details["recognized_schema_name_count"] = recognized_schema_names
+
+            # Table names are needed locally to query PRAGMA metadata, but arbitrary
+            # names are never exported. Only derived allowlisted column semantics and
+            # bounded counts leave this analyzer.
+            table_names = [str(name) for object_type, name in rows if str(object_type) == "table"][:50]
+            column_terms: set[str] = set()
+            columns_inspected = 0
+            recognized_column_names = 0
+            tables_inspected = 0
+            for table_name in table_names:
+                escaped = table_name.replace('"', '""')
+                cursor = connection.execute(f'PRAGMA table_info("{escaped}")')
+                column_rows = cursor.fetchmany(80)
+                tables_inspected += 1
+                for row in column_rows:
+                    if len(row) <= 1:
+                        continue
+                    columns_inspected += 1
+                    mapped = _semantic_terms_for_name(row[1])
+                    if mapped:
+                        recognized_column_names += 1
+                        column_terms.update(mapped)
+            details["tables_inspected"] = tables_inspected
+            details["columns_inspected"] = columns_inspected
+            details["recognized_column_terms"] = sorted(column_terms, key=stable_text_key)
+            details["recognized_column_name_count"] = recognized_column_names
         finally:
             connection.close()
     except sqlite3.Error as exc:
-        details["schema_read_error"] = str(exc)
+        details.update(_sanitized_error_fields("schema_read_error", exc))
     return details
-
 
 def _analyze_csv(path: Path) -> Dict[str, Any]:
     details: Dict[str, Any] = {}
@@ -174,15 +345,45 @@ def _analyze_csv(path: Path) -> Dict[str, Any]:
             delimiter = dialect.delimiter
         except csv.Error:
             delimiter = ","
-        first_line = sample.splitlines()[0] if sample.splitlines() else ""
-        fields = next(csv.reader([first_line], delimiter=delimiter), [])
-        details["delimiter"] = "\\t" if delimiter == "\t" else delimiter
-        details["header_fields"] = [field.strip()[:80] for field in fields[:80]]
-        details["header_field_count"] = len(fields)
-    except (OSError, UnicodeError, csv.Error) as exc:
-        details["analysis_error"] = str(exc)
-    return details
 
+        reader = csv.reader(io.StringIO(sample), delimiter=delimiter)
+        rows = list(islice(reader, 3))
+        if not rows:
+            return {"empty": True}
+        first_fields = rows[0][:80]
+        recognized_terms, recognized_fields = _derived_semantics(first_fields, 80)
+
+        # Multi-row corroboration is intentionally heuristic, not verification.
+        # Even a corroborated CSV is not allowed to independently elevate a launcher
+        # to probable until a real GameStick CSV layout has been observed/frozen.
+        comparable_rows = 0
+        data_like_rows = 0
+        for row in rows[1:]:
+            if len(row) != len(rows[0]):
+                continue
+            comparable_rows += 1
+            _, row_recognized = _derived_semantics(row, 80)
+            # A later row is data-like when most of its fields are not exact
+            # structural aliases. Raw row values never leave this function.
+            threshold = max(1, len(row) // 2)
+            if row_recognized < threshold:
+                data_like_rows += 1
+
+        corroborated = (
+            recognized_fields >= 2
+            and comparable_rows >= 1
+            and data_like_rows == comparable_rows
+        )
+        details["delimiter"] = "\\t" if delimiter == "\t" else delimiter
+        details["field_count"] = len(rows[0])
+        details["recognized_header_terms"] = recognized_terms
+        details["recognized_header_field_count"] = recognized_fields
+        details["header_semantics_corroborated"] = corroborated
+        details["rows_sampled"] = len(rows)
+        details["corroborating_data_rows"] = data_like_rows
+    except (OSError, UnicodeError, csv.Error) as exc:
+        details.update(_sanitized_error_fields("analysis_error", exc))
+    return details
 
 def _analyze_json(path: Path, size: int) -> Dict[str, Any]:
     if size > _MAX_ANALYSIS_BYTES:
@@ -191,55 +392,141 @@ def _analyze_json(path: Path, size: int) -> Dict[str, Any]:
         with path.open("r", encoding="utf-8-sig") as handle:
             payload = json.load(handle)
         if isinstance(payload, dict):
-            return {"top_level_type": "object", "top_level_keys": [str(k) for k in list(payload)[:100]]}
+            recognized_terms: set[str] = set()
+            keys_inspected = 0
+            containers_inspected = 0
+            stack: List[tuple[object, int]] = [(payload, 0)]
+            max_keys = 200
+            max_depth = 3
+            while stack and keys_inspected < max_keys:
+                current, depth = stack.pop()
+                if isinstance(current, dict):
+                    containers_inspected += 1
+                    for key, value in current.items():
+                        if keys_inspected >= max_keys:
+                            break
+                        keys_inspected += 1
+                        recognized_terms.update(_semantic_terms_for_name(key))
+                        if depth < max_depth and isinstance(value, (dict, list)):
+                            stack.append((value, depth + 1))
+                elif isinstance(current, list) and depth <= max_depth:
+                    containers_inspected += 1
+                    # Bound fan-out from arrays; values are inspected only for nested
+                    # object keys and are never serialized into evidence.
+                    for value in current[:32]:
+                        if isinstance(value, (dict, list)):
+                            stack.append((value, depth + 1))
+            return {
+                "top_level_type": "object",
+                "top_level_key_count": len(payload),
+                "recognized_key_terms": sorted(recognized_terms, key=stable_text_key),
+                "keys_inspected": keys_inspected,
+                "containers_inspected": containers_inspected,
+                "key_scan_truncated": bool(stack) or keys_inspected >= max_keys,
+            }
         if isinstance(payload, list):
             return {"top_level_type": "array", "top_level_length": len(payload)}
         return {"top_level_type": type(payload).__name__}
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        return {"analysis_error": str(exc)}
-
+        return _sanitized_error_fields("analysis_error", exc)
 
 def _analyze_xml(path: Path) -> Dict[str, Any]:
-    try:
-        text = _safe_text_prefix(path, 32 * 1024)
-        # Skip XML declarations/comments and capture only the first element name.
-        match = re.search(r"<(?!\?|!)([A-Za-z_][\w:.-]*)\b", text)
-        return {"root_element": match.group(1) if match else None}
-    except OSError as exc:
-        return {"analysis_error": str(exc)}
+    """Inspect only the first legitimate XML start element from a bounded prefix.
 
+    Regex matching is intentionally forbidden here: DOCTYPE/entity text can contain
+    element-like strings that are not document structure. ElementTree drives a real
+    XML parser and the custom target aborts immediately when the actual root start
+    event occurs. External resources are not resolved by ElementTree.
+    """
+    max_bytes = 32 * 1024
+    try:
+        parser = ET.XMLParser(target=_FirstXMLStartTarget())
+        with path.open("rb") as handle:
+            remaining = max_bytes
+            while remaining > 0:
+                chunk = handle.read(min(4096, remaining))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+                try:
+                    parser.feed(chunk)
+                except _XMLRootFound as found:
+                    local_name = _xml_local_name(found.tag)
+                    terms = sorted(set(_semantic_terms_for_name(local_name)), key=stable_text_key)
+                    return {
+                        "root_element_present": True,
+                        "recognized_root_terms": terms,
+                        "xml_root_parser": "elementtree-first-start",
+                    }
+            try:
+                parser.close()
+            except _XMLRootFound as found:
+                local_name = _xml_local_name(found.tag)
+                terms = sorted(set(_semantic_terms_for_name(local_name)), key=stable_text_key)
+                return {
+                    "root_element_present": True,
+                    "recognized_root_terms": terms,
+                    "xml_root_parser": "elementtree-first-start",
+                }
+        return {
+            "root_element_present": False,
+            "recognized_root_terms": [],
+            "xml_root_parser": "elementtree-first-start",
+            "xml_prefix_limit_reached": remaining == 0,
+        }
+    except (OSError, ET.ParseError) as exc:
+        details = {
+            "root_element_present": False,
+            "recognized_root_terms": [],
+            "xml_root_parser": "elementtree-first-start",
+        }
+        details.update(_sanitized_error_fields("analysis_error", exc))
+        return details
 
 def _analyze_text_config(path: Path) -> Dict[str, Any]:
     try:
         text = _safe_text_prefix(path)
-        sections: List[str] = []
-        keys: List[str] = []
+        section_terms: set[str] = set()
+        key_terms: set[str] = set()
+        section_count = 0
+        key_count = 0
+        entries_sampled = 0
+        max_entries = 200
+        truncated = False
         for line in text.splitlines():
             stripped = line.strip()
             if not stripped or stripped.startswith(("#", ";")):
                 continue
+            if entries_sampled >= max_entries:
+                truncated = True
+                break
             if stripped.startswith("[") and "]" in stripped:
-                sections.append(stripped[1:stripped.index("]")][:100])
+                section_count += 1
+                entries_sampled += 1
+                section_terms.update(_semantic_terms_for_name(stripped[1:stripped.index("]")][:100]))
                 continue
             match = re.match(r"([^=:#]{1,100})\s*[=:#]", stripped)
             if match:
-                keys.append(match.group(1).strip())
-            if len(sections) >= 100 and len(keys) >= 100:
-                break
+                key_count += 1
+                entries_sampled += 1
+                key_terms.update(_semantic_terms_for_name(match.group(1).strip()))
         return {
-            "sections": sections[:100],
-            "key_names": keys[:100],
+            "sampled_section_count": section_count,
+            "sampled_key_count": key_count,
+            "recognized_section_terms": sorted(section_terms, key=stable_text_key),
+            "recognized_key_terms": sorted(key_terms, key=stable_text_key),
+            "entries_sampled": entries_sampled,
+            "analysis_truncated": truncated,
         }
     except OSError as exc:
-        return {"analysis_error": str(exc)}
-
+        return _sanitized_error_fields("analysis_error", exc)
 
 def _artifact_format_and_details(path: Path, size: int) -> tuple[str, Dict[str, Any]]:
     try:
         with path.open("rb") as handle:
             header = handle.read(64)
     except OSError as exc:
-        return "unreadable", {"analysis_error": str(exc)}
+        return "unreadable", _sanitized_error_fields("analysis_error", exc)
 
     if header.startswith(b"SQLite format 3\x00"):
         return "sqlite3", _analyze_sqlite(path)
@@ -254,11 +541,11 @@ def _artifact_format_and_details(path: Path, size: int) -> tuple[str, Dict[str, 
     if suffix in _TEXT_CONFIG_SUFFIXES:
         return "text-config", _analyze_text_config(path)
     if suffix in {".db", ".sqlite", ".sqlite3"}:
-        return "database-extension/non-sqlite", {"header_hex": header[:16].hex()}
+        return "database-extension/non-sqlite", {"header_prefix_sha256": hashlib.sha256(header).hexdigest(), "header_bytes_sampled": len(header)}
     if suffix == ".dat":
         # DAT is intentionally treated as opaque until the real device tells us more.
-        return "opaque-dat", {"header_hex": header[:16].hex()}
-    return "unknown", {"header_hex": header[:16].hex()}
+        return "opaque-dat", {"header_prefix_sha256": hashlib.sha256(header).hexdigest(), "header_bytes_sampled": len(header)}
+    return "unknown", {"header_prefix_sha256": hashlib.sha256(header).hexdigest(), "header_bytes_sampled": len(header)}
 
 
 def _candidate_artifacts(root: Path) -> tuple[List[CandidateArtifact], List[str]]:
@@ -299,7 +586,7 @@ def _candidate_artifacts(root: Path) -> tuple[List[CandidateArtifact], List[str]
                 # A corrupt partial directory sample is not trusted for evidence
                 # or traversal, but its consumed work remains charged above.
                 continue
-            names = sorted(sampled.names, key=str.casefold)
+            names = sorted(sampled.names, key=stable_text_key)
         except ForensicPathError as exc:
             warnings.append(f"Skipped reparse/out-of-root directory {current_path}: {exc}")
             continue
@@ -333,7 +620,7 @@ def _candidate_artifacts(root: Path) -> tuple[List[CandidateArtifact], List[str]
             scanned_files += 1
             if scanned_files > _MAX_SCAN_FILES:
                 warnings.append(f"Metadata scan stopped after {_MAX_SCAN_FILES:,} files.")
-                results.sort(key=lambda x: x.path.casefold())
+                results.sort(key=lambda x: stable_text_key(x.path))
                 return results, warnings
 
             suffix = safe_path.suffix.casefold()
@@ -361,7 +648,7 @@ def _candidate_artifacts(root: Path) -> tuple[List[CandidateArtifact], List[str]
                 ))
                 if len(results) >= _MAX_ARTIFACTS:
                     warnings.append(f"Metadata candidate list stopped after {_MAX_ARTIFACTS:,} artifacts.")
-                    results.sort(key=lambda x: x.path.casefold())
+                    results.sort(key=lambda x: stable_text_key(x.path))
                     return results, warnings
             except ForensicPathError as exc:
                 warnings.append(f"Metadata candidate escaped forensic root and was skipped {safe_path}: {exc}")
@@ -376,7 +663,7 @@ def _candidate_artifacts(root: Path) -> tuple[List[CandidateArtifact], List[str]
         for child in reversed(child_dirs):
             stack.append((child, depth + 1))
 
-    results.sort(key=lambda x: x.path.casefold())
+    results.sort(key=lambda x: stable_text_key(x.path))
     return results, warnings
 
 def _snapshot_directory(root: Path, directory: Path) -> tuple[DirectorySnapshot, List[str]]:
@@ -402,7 +689,7 @@ def _snapshot_directory(root: Path, directory: Path) -> tuple[DirectorySnapshot,
             truncated = False
         else:
             truncated = sampled.truncated
-            names = sorted(sampled.names, key=str.casefold)
+            names = sorted(sampled.names, key=stable_text_key)
         for name in names:
             path = safe_directory / name
             try:
@@ -434,8 +721,8 @@ def _snapshot_directory(root: Path, directory: Path) -> tuple[DirectorySnapshot,
 
     return DirectorySnapshot(
         path=relative,
-        directory_names=sorted(directory_names, key=str.casefold),
-        file_names=sorted(file_names, key=str.casefold),
+        directory_names=sorted(directory_names, key=stable_text_key),
+        file_names=sorted(file_names, key=stable_text_key),
         file_extension_counts=dict(sorted(extensions.items())),
         entries_sampled=sampled_count,
         truncated=truncated,
@@ -454,7 +741,7 @@ def _directory_snapshots(root: Path) -> tuple[List[DirectorySnapshot], List[str]
                 f"Could not enumerate top-level directories after "
                 f"{sampled.enumerated:,} enumeration operations: {sampled.error}"
             ]
-        names = sorted(sampled.names, key=str.casefold)
+        names = sorted(sampled.names, key=stable_text_key)
     except ForensicPathError as exc:
         return [], [f"Could not enumerate top-level directories: {exc}"]
 
@@ -480,7 +767,7 @@ def _directory_snapshots(root: Path) -> tuple[List[DirectorySnapshot], List[str]
         except OSError as exc:
             warnings.append(f"Could not inspect top-level entry {path}: {exc}")
 
-    top_dirs.sort(key=lambda p: p.name.casefold())
+    top_dirs.sort(key=lambda p: stable_text_key(p.name))
     if len(top_dirs) > _MAX_SNAPSHOT_DIRS:
         warnings.append(
             f"Directory snapshots limited to {_MAX_SNAPSHOT_DIRS} top-level directories."
@@ -803,6 +1090,19 @@ def inspect_volume(path: str | Path) -> ProbeReport:
         warnings.append(message)
         read_errors.append(message)
 
+    try:
+        device_profile_candidate = build_device_profile_candidate(
+            profile=profile,
+            structure_sha256=_structure_hash(entries),
+            artifacts=artifacts,
+            snapshots=snapshots,
+        )
+    except Exception as exc:
+        device_profile_candidate = None
+        warnings.append(
+            f"Device Profile candidate synthesis skipped: {type(exc).__name__}: {exc}"
+        )
+
     if profile.profile_id == "unknown":
         warnings.append("No supported filesystem profile matched with useful confidence. Read-only inspection only.")
     if mapping.is_boot is True or mapping.is_system is True:
@@ -817,7 +1117,7 @@ def inspect_volume(path: str | Path) -> ProbeReport:
     probe_status = "DEGRADED" if read_errors else "COMPLETE"
 
     return ProbeReport(
-        schema_version=3,
+        schema_version=7,
         generated_at_utc=datetime.now(timezone.utc).isoformat(),
         platform=platform.platform(),
         selected_root=str(root),
@@ -840,6 +1140,10 @@ def inspect_volume(path: str | Path) -> ProbeReport:
             "rom_tree_recursive_scan": False,
             "rom_filenames_exported_from_rom_root": False,
             "forensic_enrichment_best_effort": True,
+            "device_profile_candidate_read_only": True,
+            "device_profile_candidate_additional_filesystem_traversal": False,
+            "default_metadata_evidence_exports_arbitrary_names": False,
+            "csv_semantics_can_independently_elevate_probable": False,
             "corrupt_entries_are_nonfatal": True,
             "max_metadata_scan_files": _MAX_SCAN_FILES,
             "max_metadata_enumerated_entries": _MAX_SCAN_ENUMERATED_ENTRIES,
@@ -856,6 +1160,7 @@ def inspect_volume(path: str | Path) -> ProbeReport:
             "max_macos_volume_entries": _MAX_MACOS_VOLUME_ENTRIES,
             "max_hashed_artifact_bytes": _MAX_HASH_BYTES,
         },
+        device_profile_candidate=device_profile_candidate,
     )
 
 

@@ -12,9 +12,13 @@
 - [x] prevent generated output on any partition of the source physical disk
 - [x] fail closed on stale/unknown source identity before generated output
 - [x] bind generated-output staging to a stable proven-safe Windows volume
-- [ ] capture known-good real-card evidence bundle
-- [ ] identify launcher/index format
-- [ ] correlate ROM/artwork metadata read-only
+- [ ] capture known-good real-card 0.4.0 evidence bundle
+- [x] rank launcher/index candidates from bounded schema evidence (0.4.0-alpha1)
+- [x] harden Device Profile privacy, determinism and probable-candidate semantics (0.4.0-alpha2)
+- [x] extend privacy-bounded structural semantics across CSV/JSON/config/SQLite/XML and cap CSV confidence (0.4.0-alpha3)
+- [x] sanitize parser-error evidence and replace regex XML root detection with bounded real parsing (0.4.0-alpha4)
+- [ ] identify/freeze authoritative launcher/index format from real-card evidence
+- [ ] correlate ROM/artwork metadata read-only after launcher format is confirmed
 - [ ] freeze hardware-specific Device Profile v1
 
 ## Phase 2 — Recovery Imaging

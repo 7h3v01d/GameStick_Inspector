@@ -1,5 +1,54 @@
 # Changelog
 
+## 0.4.0-alpha4 — parser-error privacy and XML parser hardening
+
+- Sanitized all evidence-bearing analyzer/parser errors; raw dependency exception strings are never serialized into candidate artifact details.
+- SQLite failures export safe error state/type and SQLite code/name only.
+- Replaced XML regex root detection with a bounded ElementTree first-start parser.
+- Added regressions for malformed SQLite schema-name leakage, XML DOCTYPE false-root evidence, malformed JSON error privacy, and generic error sanitization.
+- Probe schema bumped to v7.
+- **139/139 automated tests passing** before final packaging audit.
+
+## 0.4.0-alpha3 — Device Profile privacy/corroboration hardening
+
+- Renamed CSV `header_semantics_verified` to `header_semantics_corroborated`; bounded multi-row inspection may corroborate the shape, but CSV structural terms remain heuristic-only and cannot independently elevate a launcher candidate to `probable`.
+- Removed arbitrary JSON top-level/nested key strings from default exported evidence; retained bounded key counts and allowlisted derived semantic terms.
+- Removed arbitrary INI/CFG section/key strings from default exported evidence; retained sampled counts and allowlisted derived semantic terms.
+- Extended the same privacy-bounded name policy to SQLite schema/column names and XML root names.
+- Replaced reversible opaque header hex with a bounded header-prefix SHA-256.
+- Changed operator-facing heuristic score presentation from percent-like notation to `N/100`.
+- Probe schema v6; Device Profile candidate schema v3; structural-signature input schema v2.
+- Added end-to-end privacy regressions for headerless/spoofed CSV, JSON game-title/ROM-path keys, config game-title sections/ROM-path keys, SQLite arbitrary schema names, XML arbitrary root names, and evidence-bundle serialization.
+- Frozen recovery/imaging safety modules remain unchanged.
+- **135/135 automated tests passing** before final packaging audit.
+
+## 0.4.0-alpha2 — Device Profile privacy/determinism hardening
+
+- Removed raw/unverified CSV first-record values from exported structural evidence. CSV analysis now emits only delimiter, field count, a boolean structural-header signal, and exact allowlisted canonical header terms.
+- Added end-to-end headerless-CSV regressions proving game titles, ROM paths and artwork paths do not enter serialized probe evidence or falsely promote launcher confidence.
+- Added a central total text ordering `(casefold(value), value)` and deterministic score/path ordering for all hash-affecting Device Profile evidence.
+- Added multi-`PYTHONHASHSEED` regression coverage for case-colliding platform names (`FC` / `fc`).
+- Path/location/format-only launcher candidates are capped below the high/probable threshold; `probable` now requires internal structural corroboration.
+- Renamed the structural candidate hash from ambiguous `evidence_sha256` to `profile_signature_sha256`; it identifies structural profile evidence and intentionally ignores catalog row/content changes.
+- Bumped ProbeReport schema to **v5** and Device Profile candidate payload schema to **v2** for the serialized contract change.
+- SQLite table-column introspection now uses `fetchmany(80)` for a genuine application-level bound.
+- Frozen 0.3.4-alpha3 recovery/imaging safety modules remain unchanged.
+- **128/128 automated tests passing** before final packaging audit.
+
+## 0.4.0-alpha1 — Device Profile candidate / launcher discovery
+
+- Added deterministic read-only Device Profile v1 candidate synthesis from the existing bounded probe evidence.
+- Added ranked launcher/index candidates using filename, location, structured format and schema/header/key-name evidence.
+- Added content-root classification for ROM libraries, artwork, launcher-system data, BIOS, saves and configuration.
+- Added privacy-preserving observed platform-directory evidence from the existing ROM-root snapshot; ROM filenames remain redacted.
+- Added a Device Profile candidate ID and evidence SHA-256 so repeated equivalent probes produce a stable evidence identity.
+- Added Profile Evidence UI sections for the Device Profile candidate, launcher/index ranking and content-root roles.
+- Device Profile synthesis performs no additional filesystem traversal and does not read launcher data rows.
+- Probe JSON schema bumped to 4; existing recovery/imaging/output safety modules remain unchanged.
+- Added discovery regressions for high-confidence SQLite launcher evidence, ordinary settings-file rejection, deterministic candidate identity, content-root classification and privacy preservation.
+- **124/124 automated tests passing** before final packaging audit.
+
+
 ## 0.3.4-alpha3 — Bounded cross-platform auto-detection
 
 - Replaced Linux recursive `/media` / `/run/media` / `/mnt` auto-detect walking with bounded parsing of actual mount points from `/proc/self/mountinfo`.

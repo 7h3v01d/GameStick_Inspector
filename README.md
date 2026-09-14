@@ -1,12 +1,52 @@
-# GameStick Inspector 0.3.4-alpha3
+# GameStick Inspector 0.4.0-alpha4
 
 Safety-first GameStick SD-card inspector and **verified-transfer** full-card imager.
 
 The original prototype treated a GameStick as a mounted collection of files. This rebuild treats it as a **bootable block device plus firmware-specific filesystems and launcher metadata**.
 
-## 0.3.4-alpha3 — bounded auto-detection and truthful Browser errors
 
-This post-freeze hardening branch keeps the 0.3.3-alpha5 PASS/FREEZE recovery-imaging architecture unchanged while completing the bounded-enumeration model across user-reachable Auto-detect paths.
+## 0.4.0-alpha4 — parser-error privacy and XML structural hardening
+
+- Parser/library exception text is no longer serialized into privacy-bounded evidence. Error evidence records only a boolean state, exception type, and safe numeric/symbolic codes where available.
+- Malformed SQLite schema identifiers therefore cannot escape through `str(sqlite3.Error)`.
+- XML root discovery now uses a bounded `ElementTree.XMLParser` and the first legitimate start-element event; regex-based XML structure detection has been removed.
+- Element-like text inside comments/DOCTYPE/entity declarations cannot manufacture launcher-schema evidence.
+- Probe schema is now **v7**. Device Profile candidate schema remains **v3** and structural-signature input schema remains **v2** because their serialized fields are unchanged.
+- Frozen recovery/imaging safety modules remain unchanged from the 0.3.4-alpha3 baseline.
+
+## 0.4.0-alpha3 — interpretation privacy/corroboration hardening
+
+This patch keeps the frozen **0.3.4-alpha3 PASS/FREEZE** recovery/imaging baseline unchanged and closes the fresh interpretation/privacy findings from the alpha2 adversarial review.
+
+- CSV first-row semantics are now explicitly **corroborated**, not verified. Up to three bounded rows are inspected locally, but CSV-derived terms are **heuristic-only** and cannot independently elevate a launcher/index candidate to `probable` until a real GameStick CSV format is observed and frozen.
+- JSON no longer exports arbitrary source key names. It exports bounded counts plus allowlisted derived semantic terms only.
+- INI/CFG no longer exports arbitrary section/key names. It exports sampled counts plus allowlisted semantic terms only.
+- The same privacy rule is applied defensively to SQLite schema/column names and XML root names: arbitrary source strings stay local; exported evidence contains bounded counts and derived allowlisted terms.
+- Opaque/non-SQLite header bytes are no longer exported as reversible hex; only a SHA-256 of the bounded header prefix and the sampled-byte count are emitted.
+- Launcher/profile scores are presented as **heuristic scores (`N/100`)**, not percentages/probabilities.
+- Probe schema is now **v6** and the Device Profile candidate payload is **schema v3**, making the changed evidence semantics explicit.
+
+The default evidence bundle therefore follows one interpretation rule across structured metadata: **position alone does not make an arbitrary string schema**. Unknown names contribute counts, not raw text.
+
+## 0.4.0-alpha2 — interpretation-layer privacy/determinism hardening
+
+This patch keeps the frozen **0.3.4-alpha3 PASS/FREEZE** recovery/imaging baseline unchanged while hardening the new Device Profile interpretation layer introduced in alpha1.
+
+The Device Profile candidate is still synthesized entirely from evidence already collected by the bounded read-only probe; it performs **no additional filesystem traversal**. Alpha2 adds:
+
+- privacy-safe CSV structural analysis: arbitrary first-record values are never exported; only allowlisted, exact identifier-style structural terms such as `title`, `rom`, `path`, `image`, `system` and `platform` may be emitted;
+- an end-to-end headerless-CSV privacy boundary so game titles, ROM paths and artwork paths cannot leak into the probe/evidence bundle merely because they occupy the first CSV row;
+- total deterministic ordering for all evidence-bearing case-insensitive sorts, including case collisions such as `FC` / `fc`;
+- `probable` launcher resolution only when internal schema/header/key evidence corroborates the filename/location/format heuristic; path/format-only candidates are capped below the high-confidence threshold;
+- `profile_signature_sha256` terminology for the structural Device Profile signature. This signature is intentionally stable across catalog-row/content changes and is **not** presented as a source-evidence/content hash;
+- genuinely bounded SQLite column introspection via `fetchmany(80)` rather than materializing all columns before slicing;
+- probe schema **v5** and Device Profile candidate payload schema **v2** to make the serialized field/meaning changes explicit.
+
+This remains a **candidate**, not a frozen hardware profile. The next step is still to run the inspector against a known-good real GameStick and use the resulting evidence bundle to identify the authoritative launcher/index format before correlation or modification code is added.
+
+## 0.3.4-alpha3 — frozen hostile-filesystem/resource-hardening baseline
+
+This PASS/FREEZE branch keeps the 0.3.3-alpha5 recovery-imaging architecture unchanged while completing the bounded-enumeration model across user-reachable Auto-detect paths.
 
 Directory traversal uses the central streaming `bounded_scandir_names()` primitive. A requested sample of `N` entries performs at most `N + 1` iterator advances; mid-enumeration filesystem errors preserve and charge partial work, and incomplete samples are not trusted as evidence.
 
@@ -169,6 +209,6 @@ Runtime/dev dependencies are pinned in `requirements.txt` / `requirements-dev.tx
 
 ## Validation
 
-Current suite: **118/118 passing** before the final packaging audit.
+Current suite: **139/139 passing** before the final packaging audit.
 
 See `docs/SAFETY.md`, `docs/DESIGN.md` and `docs/ROADMAP.md`.

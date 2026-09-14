@@ -120,6 +120,42 @@ class ImageResult:
     completed_at_utc: str
 
 
+@dataclass(frozen=True)
+class LauncherCandidate:
+    path: str
+    format_name: str
+    score: int
+    confidence: str
+    role_hints: List[str] = field(default_factory=list)
+    evidence: List[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class ContentRootHint:
+    path: str
+    role: str
+    score: int
+    evidence: List[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class DeviceProfileCandidate:
+    schema_version: int
+    candidate_id: str
+    status: str
+    base_profile_id: str
+    base_profile_score: int
+    launcher_resolution: str
+    launcher_path: Optional[str]
+    launcher_format: Optional[str]
+    launcher_confidence: str
+    launcher_candidates: List[LauncherCandidate] = field(default_factory=list)
+    content_roots: List[ContentRootHint] = field(default_factory=list)
+    platform_directories: List[str] = field(default_factory=list)
+    profile_signature_sha256: str = ""
+    notes: List[str] = field(default_factory=list)
+
+
 @dataclass
 class ProbeReport:
     schema_version: int
@@ -140,6 +176,7 @@ class ProbeReport:
     probe_status: str = "COMPLETE"
     read_errors: List[str] = field(default_factory=list)
     probe_policy: Dict[str, Any] = field(default_factory=dict)
+    device_profile_candidate: Optional[DeviceProfileCandidate] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

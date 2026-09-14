@@ -38,7 +38,7 @@ def main() -> int:
     print(f"Disk:        {plan.disk_number} — {plan.disk_name}")
     print(f"Capacity:    {_fmt_bytes(plan.source_size)}")
     print(f"Bus:         {plan.bus_type or 'Unknown'}")
-    print(f"Profile:     {plan.profile_id} ({plan.profile_score}%)")
+    print(f"Profile:     {plan.profile_id} (heuristic score {plan.profile_score}/100)")
     print(f"Destination: {plan.destination}")
     print("\nNo raw write access to the GameStick is requested.")
     print(f"Type exactly: {plan.confirmation_phrase}")
