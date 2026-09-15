@@ -44,7 +44,7 @@ def test_evidence_bundle_contains_only_generated_evidence(tmp_path):
             assert manifest["files"][name]["size"] == len(data)
             assert manifest["files"][name]["sha256"] == hashlib.sha256(data).hexdigest()
         payload = json.loads(archive.read("gamestick_probe.json"))
-        assert payload["schema_version"] == 7
+        assert payload["schema_version"] == 9
 
 
 
@@ -76,7 +76,7 @@ def test_probe_report_written_atomically(tmp_path):
     saved = write_probe_report(report, destination)
     assert saved.exists()
     assert not destination.with_suffix(".json.tmp").exists()
-    assert json.loads(saved.read_text(encoding="utf-8"))["schema_version"] == 7
+    assert json.loads(saved.read_text(encoding="utf-8"))["schema_version"] == 9
 
 
 def test_probe_report_refuses_preexisting_predictable_temp_symlink(tmp_path):

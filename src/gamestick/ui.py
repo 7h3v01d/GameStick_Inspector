@@ -33,7 +33,7 @@ from .probe import find_candidate_volumes, inspect_volume
 from .reporting import write_evidence_bundle, write_probe_report
 from .windows_privilege import is_process_elevated, relaunch_current_app_elevated
 
-VERSION = "0.4.0-alpha4"
+VERSION = "0.4.0-alpha6"
 _BROWSER_PER_DIRECTORY_LIMIT = 1000
 _BROWSER_TOTAL_NODE_LIMIT = 5000
 
@@ -316,7 +316,7 @@ class StructureTab(QWidget):
                     f"Top launcher/index: {discovery.launcher_path or 'unresolved'}",
                     f"Format: {discovery.launcher_format or 'unresolved'}   Confidence: {discovery.launcher_confidence}",
                     f"Profile signature SHA-256: {discovery.profile_signature_sha256}",
-                    f"Observed ROM platform directories: {', '.join(discovery.platform_directories) or 'none in bounded evidence'}",
+                    f"Recognized ROM platform semantics: {', '.join(discovery.platform_directories) or 'none in bounded evidence'}",
                 ])
             )
             for candidate in discovery.launcher_candidates:

@@ -17,6 +17,8 @@
 - [x] harden Device Profile privacy, determinism and probable-candidate semantics (0.4.0-alpha2)
 - [x] extend privacy-bounded structural semantics across CSV/JSON/config/SQLite/XML and cap CSV confidence (0.4.0-alpha3)
 - [x] sanitize parser-error evidence and replace regex XML root detection with bounded real parsing (0.4.0-alpha4)
+- [x] close privacy-redacted filesystem-warning filename side channels (0.4.0-alpha5)
+- [x] close snapshot-derived ROM/artwork name privacy and false-platform channels (0.4.0-alpha6)
 - [ ] identify/freeze authoritative launcher/index format from real-card evidence
 - [ ] correlate ROM/artwork metadata read-only after launcher format is confirmed
 - [ ] freeze hardware-specific Device Profile v1

@@ -29,6 +29,12 @@ from .fs_safety import (
     lstat_non_reparse,
 )
 from .ordering import stable_text_key
+from .privacy import (
+    ARTWORK_LIBRARY_ROOT_NAMES,
+    PRIVACY_LIBRARY_ROOT_NAMES,
+    ROM_LIBRARY_ROOT_NAMES,
+    canonical_platform_name,
+)
 from .models import (
     CandidateArtifact,
     DirectorySnapshot,
@@ -69,7 +75,9 @@ _MAX_MACOS_VOLUME_ENTRIES = 512
 _LINUX_MOUNT_BASES = (Path("/media"), Path("/run/media"), Path("/mnt"))
 _MACOS_VOLUMES_ROOT = Path("/Volumes")
 
-_ROM_LIKE_DIRS = {"rom", "roms", "games"}
+_ROM_LIKE_DIRS = set(ROM_LIBRARY_ROOT_NAMES)
+_ARTWORK_LIKE_DIRS = set(ARTWORK_LIBRARY_ROOT_NAMES)
+_PRIVACY_LIBRARY_DIRS = set(PRIVACY_LIBRARY_ROOT_NAMES)
 _TEXT_CONFIG_SUFFIXES = {".ini", ".cfg", ".conf"}
 
 # Names found inside media-supplied metadata are untrusted data until a real
@@ -180,6 +188,46 @@ def _sanitized_error_fields(prefix: str, exc: BaseException) -> Dict[str, Any]:
     return details
 
 
+def _sanitized_exception_summary(exc: BaseException) -> str:
+    """Return an evidence-safe exception summary with no raw dependency text."""
+    summary = type(exc).__name__
+    if isinstance(exc, OSError) and isinstance(exc.errno, int):
+        summary += f" (errno={exc.errno})"
+    return summary
+
+
+def _evidence_safe_path(root: Path, path: Path) -> tuple[str, bool]:
+    """Return a root-relative path safe for privacy-bounded evidence.
+
+    Any entry beneath a ROM- or artwork-like top-level privacy directory is
+    represented only as ``<root>/<redacted>``. This function is lexical on purpose: a rejected
+    reparse entry must not be resolved merely to format a diagnostic.
+    """
+    root_resolved = root.resolve(strict=True)
+    candidate = Path(path)
+    try:
+        relative = candidate.relative_to(root_resolved)
+    except ValueError:
+        return "<outside-root>", False
+
+    parts = relative.parts
+    if not parts:
+        return ".", False
+    if parts[0].casefold() in _PRIVACY_LIBRARY_DIRS and len(parts) > 1:
+        return f"{parts[0]}/<redacted>", True
+    return relative.as_posix(), False
+
+
+def _filesystem_warning(action: str, root: Path, path: Path, exc: BaseException) -> str:
+    """Format an exported filesystem diagnostic without privacy side channels.
+
+    Paths below ROM-like roots are filename-redacted. Raw exception text is never
+    serialized because OS/library messages commonly repeat media-controlled paths.
+    """
+    safe_path, _ = _evidence_safe_path(root, path)
+    return f"{action} {safe_path}: {_sanitized_exception_summary(exc)}"
+
+
 class _XMLRootFound(Exception):
     def __init__(self, tag: object):
         super().__init__("XML root found")
@@ -229,12 +277,13 @@ def _root_entries(root: Path) -> tuple[List[Dict[str, object]], List[str]]:
         sampled = bounded_scandir_names(safe_root, _MAX_ROOT_ENTRIES)
         if sampled.error is not None:
             return [], [
-                f"Could not enumerate volume root {root} after "
-                f"{sampled.enumerated:,} enumeration operations: {sampled.error}"
+                f"Could not enumerate volume root after "
+                f"{sampled.enumerated:,} enumeration operations: "
+                f"{_sanitized_exception_summary(sampled.error)}"
             ]
         names = sorted(sampled.names, key=stable_text_key)
     except ForensicPathError as exc:
-        return [], [f"Could not enumerate volume root {root}: {exc}"]
+        return [], [f"Could not enumerate volume root: {_sanitized_exception_summary(exc)}"]
 
     if sampled.truncated:
         warnings.append(
@@ -258,11 +307,11 @@ def _root_entries(root: Path) -> tuple[List[Dict[str, object]], List[str]]:
                 size = None
             entries.append({"name": item.name, "type": entry_type, "size": size})
         except ForensicPathError as exc:
-            warnings.append(f"Skipped reparse/out-of-root entry {item}: {exc}")
+            warnings.append(_filesystem_warning("Skipped reparse/out-of-root entry", root, item, exc))
         except OSError as exc:
-            message = f"Could not inspect root entry {item}: {exc}"
+            message = _filesystem_warning("Could not inspect root entry", root, item, exc)
             warnings.append(message)
-            entries.append({"name": item.name, "type": "unreadable", "error": str(exc)})
+            entries.append({"name": item.name, "type": "unreadable", "error": _sanitized_exception_summary(exc)})
     return entries, warnings
 
 def _structure_hash(entries: List[Dict[str, object]]) -> str:
@@ -574,8 +623,9 @@ def _candidate_artifacts(root: Path) -> tuple[List[CandidateArtifact], List[str]
             enumerated_entries += sampled.enumerated
             if sampled.error is not None:
                 warnings.append(
-                    f"Could not enumerate {safe_current} after "
-                    f"{sampled.enumerated:,} enumeration operations: {sampled.error}"
+                    f"Could not enumerate {_evidence_safe_path(root, safe_current)[0]} after "
+                    f"{sampled.enumerated:,} enumeration operations: "
+                    f"{_sanitized_exception_summary(sampled.error)}"
                 )
                 if enumerated_entries >= _MAX_SCAN_ENUMERATED_ENTRIES:
                     warnings.append(
@@ -588,7 +638,7 @@ def _candidate_artifacts(root: Path) -> tuple[List[CandidateArtifact], List[str]
                 continue
             names = sorted(sampled.names, key=stable_text_key)
         except ForensicPathError as exc:
-            warnings.append(f"Skipped reparse/out-of-root directory {current_path}: {exc}")
+            warnings.append(_filesystem_warning("Skipped reparse/out-of-root directory", root, current_path, exc))
             continue
 
         if sampled.truncated:
@@ -604,10 +654,10 @@ def _candidate_artifacts(root: Path) -> tuple[List[CandidateArtifact], List[str]
                 safe_path = assert_contained_non_reparse(root, path)
                 st = lstat_non_reparse(safe_path)
             except ForensicPathError as exc:
-                warnings.append(f"Skipped reparse/out-of-root entry {path}: {exc}")
+                warnings.append(_filesystem_warning("Skipped reparse/out-of-root entry", root, path, exc))
                 continue
             except OSError as exc:
-                warnings.append(f"Could not inspect directory entry {path}: {exc}")
+                warnings.append(_filesystem_warning("Could not inspect directory entry", root, path, exc))
                 continue
 
             if stat.S_ISDIR(st.st_mode):
@@ -651,13 +701,11 @@ def _candidate_artifacts(root: Path) -> tuple[List[CandidateArtifact], List[str]
                     results.sort(key=lambda x: stable_text_key(x.path))
                     return results, warnings
             except ForensicPathError as exc:
-                warnings.append(f"Metadata candidate escaped forensic root and was skipped {safe_path}: {exc}")
+                warnings.append(_filesystem_warning("Metadata candidate escaped forensic root and was skipped", root, safe_path, exc))
             except OSError as exc:
-                warnings.append(f"Could not inspect {safe_path}: {exc}")
+                warnings.append(_filesystem_warning("Could not inspect", root, safe_path, exc))
             except Exception as exc:
-                warnings.append(
-                    f"Metadata analysis skipped for {safe_path}: {type(exc).__name__}: {exc}"
-                )
+                warnings.append(_filesystem_warning("Metadata analysis skipped for", root, safe_path, exc))
 
         # Reverse push preserves the sorted order of the bounded sample with a LIFO stack.
         for child in reversed(child_dirs):
@@ -670,7 +718,8 @@ def _snapshot_directory(root: Path, directory: Path) -> tuple[DirectorySnapshot,
     safe_directory = assert_contained_non_reparse(root, directory)
     resolved_root = root.resolve(strict=True)
     relative = str(safe_directory.relative_to(resolved_root))
-    redact_filenames = safe_directory.name.casefold() in _ROM_LIKE_DIRS
+    privacy_root = safe_directory.name.casefold() in _PRIVACY_LIBRARY_DIRS
+    redact_filenames = privacy_root
     directory_names: List[str] = []
     file_names: List[str] = []
     extensions: Counter[str] = Counter()
@@ -682,8 +731,9 @@ def _snapshot_directory(root: Path, directory: Path) -> tuple[DirectorySnapshot,
         sampled = bounded_scandir_names(safe_directory, _MAX_SNAPSHOT_ENTRIES)
         if sampled.error is not None:
             warnings.append(
-                f"Could not enumerate directory {safe_directory} after "
-                f"{sampled.enumerated:,} enumeration operations: {sampled.error}"
+                f"Could not enumerate directory {_evidence_safe_path(root, safe_directory)[0]} after "
+                f"{sampled.enumerated:,} enumeration operations: "
+                f"{_sanitized_exception_summary(sampled.error)}"
             )
             names = []
             truncated = False
@@ -696,15 +746,19 @@ def _snapshot_directory(root: Path, directory: Path) -> tuple[DirectorySnapshot,
                 safe_path = assert_contained_non_reparse(root, path)
                 st = lstat_non_reparse(safe_path)
             except ForensicPathError as exc:
-                warnings.append(f"Skipped reparse/out-of-root snapshot entry {path}: {exc}")
+                warnings.append(_filesystem_warning("Skipped reparse/out-of-root snapshot entry", root, path, exc))
                 continue
             except OSError as exc:
-                warnings.append(f"Could not inspect directory entry {path}: {exc}")
+                warnings.append(_filesystem_warning("Could not inspect directory entry", root, path, exc))
                 continue
 
             sampled_count += 1
             if stat.S_ISDIR(st.st_mode):
-                if len(directory_names) < 150:
+                if privacy_root:
+                    platform = canonical_platform_name(name)
+                    if platform is not None and platform not in directory_names and len(directory_names) < 150:
+                        directory_names.append(platform)
+                elif len(directory_names) < 150:
                     directory_names.append(name)
             elif stat.S_ISREG(st.st_mode):
                 suffix = Path(name).suffix.casefold() or "<none>"
@@ -717,7 +771,7 @@ def _snapshot_directory(root: Path, directory: Path) -> tuple[DirectorySnapshot,
                 f"{_MAX_SNAPSHOT_ENTRIES:,} entries."
             )
     except OSError as exc:
-        warnings.append(f"Could not enumerate directory {safe_directory}: {exc}")
+        warnings.append(_filesystem_warning("Could not enumerate directory", root, safe_directory, exc))
 
     return DirectorySnapshot(
         path=relative,
@@ -739,11 +793,12 @@ def _directory_snapshots(root: Path) -> tuple[List[DirectorySnapshot], List[str]
         if sampled.error is not None:
             return [], [
                 f"Could not enumerate top-level directories after "
-                f"{sampled.enumerated:,} enumeration operations: {sampled.error}"
+                f"{sampled.enumerated:,} enumeration operations: "
+                f"{_sanitized_exception_summary(sampled.error)}"
             ]
         names = sorted(sampled.names, key=stable_text_key)
     except ForensicPathError as exc:
-        return [], [f"Could not enumerate top-level directories: {exc}"]
+        return [], [f"Could not enumerate top-level directories: {_sanitized_exception_summary(exc)}"]
 
     if sampled.truncated:
         warnings.append(
@@ -763,9 +818,9 @@ def _directory_snapshots(root: Path) -> tuple[List[DirectorySnapshot], List[str]
                 if len(top_dirs) > _MAX_SNAPSHOT_DIRS:
                     break
         except ForensicPathError as exc:
-            warnings.append(f"Skipped reparse/out-of-root top-level entry {path}: {exc}")
+            warnings.append(_filesystem_warning("Skipped reparse/out-of-root top-level entry", root, path, exc))
         except OSError as exc:
-            warnings.append(f"Could not inspect top-level entry {path}: {exc}")
+            warnings.append(_filesystem_warning("Could not inspect top-level entry", root, path, exc))
 
     top_dirs.sort(key=lambda p: stable_text_key(p.name))
     if len(top_dirs) > _MAX_SNAPSHOT_DIRS:
@@ -779,9 +834,9 @@ def _directory_snapshots(root: Path) -> tuple[List[DirectorySnapshot], List[str]
             snapshots.append(snapshot)
             warnings.extend(snapshot_warnings)
         except ForensicPathError as exc:
-            warnings.append(f"Directory snapshot skipped for {directory}: {exc}")
+            warnings.append(_filesystem_warning("Directory snapshot skipped for", root, directory, exc))
         except Exception as exc:
-            warnings.append(f"Directory snapshot skipped for {directory}: {type(exc).__name__}: {exc}")
+            warnings.append(_filesystem_warning("Directory snapshot skipped for", root, directory, exc))
     return snapshots, warnings
 
 def _as_optional_str(value: Any) -> Optional[str]:
@@ -1033,7 +1088,7 @@ def inspect_volume(path: str | Path) -> ProbeReport:
         total, used, free = usage.total, usage.used, usage.free
     except OSError as exc:
         total = used = free = None
-        message = f"Could not read filesystem usage: {exc}"
+        message = f"Could not read filesystem usage: {_sanitized_exception_summary(exc)}"
         warnings.append(message)
         read_errors.append(message)
 
@@ -1053,7 +1108,7 @@ def inspect_volume(path: str | Path) -> ProbeReport:
             matched_markers=[],
             missing_markers=[],
         )
-        warnings.append(f"Profile scoring degraded: {type(exc).__name__}: {exc}")
+        warnings.append(f"Profile scoring degraded: {_sanitized_exception_summary(exc)}")
 
     try:
         mapping = _physical_mapping(root)
@@ -1066,7 +1121,7 @@ def inspect_volume(path: str | Path) -> ProbeReport:
         read_errors.extend(_read_issue_messages(root_warnings))
     except Exception as exc:
         entries = []
-        message = f"Root structure scan skipped: {type(exc).__name__}: {exc}"
+        message = f"Root structure scan skipped: {_sanitized_exception_summary(exc)}"
         warnings.append(message)
         read_errors.append(message)
 
@@ -1076,7 +1131,7 @@ def inspect_volume(path: str | Path) -> ProbeReport:
         read_errors.extend(_read_issue_messages(snapshot_warnings))
     except Exception as exc:
         snapshots = []
-        message = f"Directory snapshot enrichment skipped: {type(exc).__name__}: {exc}"
+        message = f"Directory snapshot enrichment skipped: {_sanitized_exception_summary(exc)}"
         warnings.append(message)
         read_errors.append(message)
 
@@ -1086,7 +1141,7 @@ def inspect_volume(path: str | Path) -> ProbeReport:
         read_errors.extend(_read_issue_messages(artifact_warnings))
     except Exception as exc:
         artifacts = []
-        message = f"Metadata enrichment skipped: {type(exc).__name__}: {exc}"
+        message = f"Metadata enrichment skipped: {_sanitized_exception_summary(exc)}"
         warnings.append(message)
         read_errors.append(message)
 
@@ -1100,7 +1155,7 @@ def inspect_volume(path: str | Path) -> ProbeReport:
     except Exception as exc:
         device_profile_candidate = None
         warnings.append(
-            f"Device Profile candidate synthesis skipped: {type(exc).__name__}: {exc}"
+            f"Device Profile candidate synthesis skipped: {_sanitized_exception_summary(exc)}"
         )
 
     if profile.profile_id == "unknown":
@@ -1117,7 +1172,7 @@ def inspect_volume(path: str | Path) -> ProbeReport:
     probe_status = "DEGRADED" if read_errors else "COMPLETE"
 
     return ProbeReport(
-        schema_version=7,
+        schema_version=9,
         generated_at_utc=datetime.now(timezone.utc).isoformat(),
         platform=platform.platform(),
         selected_root=str(root),
@@ -1139,6 +1194,10 @@ def inspect_volume(path: str | Path) -> ProbeReport:
             "raw_device_access_used": False,
             "rom_tree_recursive_scan": False,
             "rom_filenames_exported_from_rom_root": False,
+            "artwork_filenames_exported_from_artwork_root": False,
+            "privacy_library_child_names_exported_arbitrarily": False,
+            "platform_directory_evidence_allowlisted": True,
+            "privacy_redacted_filesystem_diagnostics": True,
             "forensic_enrichment_best_effort": True,
             "device_profile_candidate_read_only": True,
             "device_profile_candidate_additional_filesystem_traversal": False,

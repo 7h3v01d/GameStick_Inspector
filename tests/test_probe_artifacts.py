@@ -90,7 +90,7 @@ def test_json_reports_derived_key_terms_not_raw_keys_or_values(tmp_path):
     assert "private-value" not in json.dumps(artifact.details)
 
 
-def test_rom_root_snapshot_redacts_file_names_but_keeps_platform_dirs(tmp_path):
+def test_rom_root_snapshot_redacts_arbitrary_names_but_keeps_recognized_platform_semantics(tmp_path):
     _make_layout(tmp_path)
     (tmp_path / "Roms" / "FC").mkdir()
     (tmp_path / "Roms" / "SFC").mkdir()
@@ -104,17 +104,18 @@ def test_rom_root_snapshot_redacts_file_names_but_keeps_platform_dirs(tmp_path):
     assert snapshot.file_extension_counts[".nes"] == 1
 
 
-def test_probe_schema_v7_and_policy(tmp_path):
+def test_probe_schema_v9_and_policy(tmp_path):
     _make_layout(tmp_path)
     report = inspect_volume(tmp_path)
-    assert report.schema_version == 7
+    assert report.schema_version == 9
     assert report.probe_policy["device_write_paths_enabled"] is False
     assert report.probe_policy["raw_device_access_used"] is False
     assert report.probe_policy["rom_tree_recursive_scan"] is False
+    assert report.probe_policy["privacy_redacted_filesystem_diagnostics"] is True
     assert report.probe_policy["device_profile_candidate_read_only"] is True
     assert report.probe_policy["device_profile_candidate_additional_filesystem_traversal"] is False
     assert report.device_profile_candidate is not None
-    assert report.device_profile_candidate.schema_version == 3
+    assert report.device_profile_candidate.schema_version == 4
 
 
 def test_headerless_csv_does_not_export_first_data_row_or_create_semantic_evidence(tmp_path):

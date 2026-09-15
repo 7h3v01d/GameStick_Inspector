@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.4.0-alpha6 — snapshot-derived privacy semantics
+
+- Artwork-library filenames are privacy-redacted by default, matching the ROM-library policy.
+- Arbitrary first-level child directory names under ROM/artwork roots are no longer exported as structural evidence.
+- Added a conservative exact platform canonicalizer; only recognized platform tokens may leave privacy-library snapshots or feed Device Profile `platform_directories`.
+- Arbitrary game/artwork folder names therefore cannot influence `profile_signature_sha256`.
+- Extended evidence-safe filesystem diagnostic path redaction to artwork-library roots.
+- Added end-to-end regressions for `Roms/Secret Game Folder/`, allowlisted `Roms/FC`, `image/Secret Game Name.png`, and private artwork child folders across ProbeReport, Device Profile, `SUMMARY.txt`, and the complete evidence ZIP.
+- Probe schema bumped to **v9**; Device Profile candidate schema bumped to **v4**; structural-signature input schema bumped to **v3**.
+- Frozen recovery/imaging safety modules remain unchanged.
+- **147/147 automated tests passing** before final packaging audit.
+
+
+## 0.4.0-alpha5 — privacy-safe filesystem diagnostics
+
+- Centralized exported filesystem diagnostic formatting so raw OS/library exception strings do not bypass the privacy boundary.
+- Paths beneath ROM-like privacy-redacted roots are serialized as `<root>/<redacted>` rather than exposing ROM filenames.
+- Added reparse/`ForensicPathError` and unreadable/`OSError` ROM regressions covering ProbeReport JSON, `SUMMARY.txt`, and the complete evidence bundle.
+- Filesystem diagnostics retain useful exception type and safe errno values while discarding media-controlled raw exception text.
+- Documented that XML structural corroboration proves a genuine root start-element was observed, not complete XML well-formedness.
+- Probe schema bumped to **v8**; Device Profile candidate remains schema v3.
+- Frozen recovery/imaging safety modules remain unchanged.
+- **142/142 automated tests passing** before final packaging audit.
+
+
 ## 0.4.0-alpha4 — parser-error privacy and XML parser hardening
 
 - Sanitized all evidence-bearing analyzer/parser errors; raw dependency exception strings are never serialized into candidate artifact details.

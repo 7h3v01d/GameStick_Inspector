@@ -7,6 +7,7 @@ from pathlib import PurePosixPath
 from typing import Iterable, List, Sequence
 
 from .ordering import stable_path_score_key, stable_text_key
+from .privacy import canonical_platform_name
 from .models import (
     CandidateArtifact,
     ContentRootHint,
@@ -228,7 +229,21 @@ def identify_content_roots(snapshots: Sequence[DirectorySnapshot]) -> List[Conte
         if snapshot.file_names_redacted:
             evidence.append("filenames are privacy-redacted in exported evidence")
         if snapshot.directory_names:
-            evidence.append(f"observed child directories: {len(snapshot.directory_names)}")
+            if role in {"rom-library", "artwork-library"}:
+                safe_platforms = sorted(
+                    {
+                        canonical
+                        for value in snapshot.directory_names
+                        if (canonical := canonical_platform_name(value)) is not None
+                    },
+                    key=stable_text_key,
+                )
+                if safe_platforms:
+                    evidence.append(
+                        "recognized platform semantics: " + ", ".join(safe_platforms[:32])
+                    )
+            else:
+                evidence.append(f"observed child directories: {len(snapshot.directory_names)}")
         roots.append(
             ContentRootHint(
                 path=normalized,
@@ -249,7 +264,10 @@ def _platform_directories(
         normalized = snapshot.path.replace("\\", "/").strip("/")
         if normalized.casefold() not in rom_paths:
             continue
-        platforms.update(name for name in snapshot.directory_names if name)
+        for name in snapshot.directory_names:
+            canonical = canonical_platform_name(name)
+            if canonical is not None:
+                platforms.add(canonical)
     return sorted(platforms, key=stable_text_key)[:256]
 
 
@@ -286,7 +304,7 @@ def build_device_profile_candidate(
         notes.append("No launcher/index candidate reached the minimum evidence threshold.")
 
     evidence_payload = {
-        "schema_version": 2,
+        "schema_version": 3,
         "base_profile_id": profile.profile_id,
         "base_profile_score": profile.score,
         "structure_sha256": structure_sha256,
@@ -303,7 +321,7 @@ def build_device_profile_candidate(
     profile_signature_sha256 = hashlib.sha256(canonical).hexdigest()
 
     return DeviceProfileCandidate(
-        schema_version=3,
+        schema_version=4,
         candidate_id=f"dpv1-candidate-{profile_signature_sha256[:16]}",
         status="CANDIDATE",
         base_profile_id=profile.profile_id,

@@ -30,7 +30,8 @@ def test_corrupt_metadata_file_does_not_abort_probe(tmp_path, monkeypatch):
     assert report.profile.profile_id == "observed_cubegm_layout"
     assert report.profile.score >= 90
     assert any("00.dat" in message for message in report.read_errors)
-    assert any("corrupted and unreadable" in message for message in report.read_errors)
+    assert any("OSError (errno=1392)" in message for message in report.read_errors)
+    assert all("corrupted and unreadable" not in message for message in report.read_errors)
     # The critical contract: a usable report exists despite the bad file.
     assert report.structure_sha256
     assert report.probe_policy["corrupt_entries_are_nonfatal"] is True

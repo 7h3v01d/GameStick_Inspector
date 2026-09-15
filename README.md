@@ -1,9 +1,30 @@
-# GameStick Inspector 0.4.0-alpha4
+# GameStick Inspector 0.4.0-alpha6
 
 Safety-first GameStick SD-card inspector and **verified-transfer** full-card imager.
 
 The original prototype treated a GameStick as a mounted collection of files. This rebuild treats it as a **bootable block device plus firmware-specific filesystems and launcher metadata**.
 
+
+
+## 0.4.0-alpha6 — snapshot-name privacy hardening
+
+- ROM-like and artwork-like library roots now treat arbitrary child file **and directory** names as private by default.
+- Artwork filenames such as `image/Secret Game Name.png` are redacted from default probe/evidence output just like ROM filenames.
+- First-level names beneath privacy library roots are no longer exported verbatim merely because they occupy a structural-looking position.
+- Recognized platform evidence is derived only through an exact conservative allowlist/canonicalizer (for example `FC`, `SFC`, `PS1`, `GBA`); unknown names remain local and do not enter `DirectorySnapshot`, Device Profile `platform_directories`, or `profile_signature_sha256`.
+- Filesystem diagnostics beneath artwork roots now use the same `<redacted>` path treatment already used for ROM roots.
+- Probe schema is now **v9**; Device Profile candidate schema is **v4**; structural-signature input schema is **v3** to make the tightened snapshot semantics explicit.
+- Frozen recovery/imaging safety modules remain unchanged from the 0.3.4-alpha3 baseline.
+
+## 0.4.0-alpha5 — privacy-safe filesystem diagnostics
+
+- Exported filesystem warnings now use a central evidence-safe path/error formatter.
+- Entries beneath privacy-redacted ROM-like roots are represented as `Roms/<redacted>` (or the corresponding top-level ROM-like root); filenames never escape through warning/read-error text.
+- Raw `OSError` / `ForensicPathError` text is not serialized in filesystem diagnostics because operating-system messages can repeat media-controlled paths. Evidence retains the exception type and safe `errno` where available.
+- Reparse and unreadable-ROM regressions verify filename absence from `ProbeReport.to_dict()`, `gamestick_probe.json`, `SUMMARY.txt`, and the evidence ZIP while still recording the skip/error and DEGRADED state when appropriate.
+- XML launcher corroboration means a genuine root **start element** was observed within the bounded sample; it does not claim the XML document was fully parsed or well-formed.
+- Probe schema is now **v8**. Device Profile candidate schema remains **v3**.
+- Frozen recovery/imaging safety modules remain unchanged from the 0.3.4-alpha3 baseline.
 
 ## 0.4.0-alpha4 — parser-error privacy and XML structural hardening
 
@@ -209,6 +230,6 @@ Runtime/dev dependencies are pinned in `requirements.txt` / `requirements-dev.tx
 
 ## Validation
 
-Current suite: **139/139 passing** before the final packaging audit.
+Current suite: **147/147 passing** before the final packaging audit.
 
 See `docs/SAFETY.md`, `docs/DESIGN.md` and `docs/ROADMAP.md`.

@@ -82,7 +82,7 @@ def test_content_roots_and_platform_directories_are_derived_from_existing_snapsh
             entries_sampled=13,
             file_names_redacted=True,
         ),
-        DirectorySnapshot(path="image", directory_names=["FC", "SFC"], entries_sampled=2),
+        DirectorySnapshot(path="image", directory_names=["FC", "SFC"], entries_sampled=2, file_names_redacted=True),
         DirectorySnapshot(path="cubegm", directory_names=[], entries_sampled=1),
     ]
     candidate = build_device_profile_candidate(
@@ -117,7 +117,7 @@ def test_device_profile_candidate_is_deterministic():
     first = build_device_profile_candidate(**kwargs)
     second = build_device_profile_candidate(**kwargs)
     assert first == second
-    assert first.schema_version == 3
+    assert first.schema_version == 4
     assert first.candidate_id.startswith("dpv1-candidate-")
     assert len(first.profile_signature_sha256) == 64
     assert first.launcher_path == "cubegm/game.csv"
@@ -154,7 +154,7 @@ print(json.dumps({"id": c.candidate_id, "sig": c.profile_signature_sha256, "plat
         )
         outputs.append(json.loads(completed.stdout))
     assert all(item == outputs[0] for item in outputs[1:])
-    assert outputs[0]["platforms"] == ["FC", "fc", "PS1"]
+    assert outputs[0]["platforms"] == ["FC", "PS1"]
 
 
 def test_device_profile_candidate_contains_no_csv_data_values():
@@ -200,3 +200,23 @@ def test_csv_structural_terms_cannot_independently_elevate_probable():
     )
     assert candidate.launcher_resolution == "candidate"
     assert any("heuristic score 74/100" in note for note in candidate.notes)
+
+
+def test_arbitrary_rom_child_names_do_not_affect_platform_evidence_or_profile_signature():
+    common = dict(
+        profile=_profile(),
+        structure_sha256="9" * 64,
+        artifacts=[],
+    )
+    first = build_device_profile_candidate(
+        **common,
+        snapshots=[DirectorySnapshot(path="Roms", directory_names=["Secret Game Folder"], file_names_redacted=True)],
+    )
+    second = build_device_profile_candidate(
+        **common,
+        snapshots=[DirectorySnapshot(path="Roms", directory_names=["Another Private Title"], file_names_redacted=True)],
+    )
+    assert first.platform_directories == []
+    assert second.platform_directories == []
+    assert first.profile_signature_sha256 == second.profile_signature_sha256
+    assert first.candidate_id == second.candidate_id
