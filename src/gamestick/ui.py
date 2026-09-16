@@ -35,7 +35,7 @@ from .probe import find_candidate_volumes, inspect_volume
 from .reporting import write_evidence_bundle, write_probe_report
 from .windows_privilege import is_process_elevated, relaunch_current_app_elevated
 
-VERSION = "0.5.0-alpha8"
+VERSION = "0.5.0-alpha8.2"
 _BROWSER_PER_DIRECTORY_LIMIT = 1000
 _BROWSER_TOTAL_NODE_LIMIT = 5000
 
@@ -747,7 +747,7 @@ class BrowserTab(QWidget):
 
 
 class RawImageThread(QThread):
-    progress = pyqtSignal(str, int, int)
+    progress = pyqtSignal(str, object, object)
     succeeded = pyqtSignal(object)
     failed = pyqtSignal(str)
 
@@ -770,7 +770,7 @@ class RawImageThread(QThread):
 
 
 class ImageCompareThread(QThread):
-    progress = pyqtSignal(int, int)
+    progress = pyqtSignal(object, object)
     succeeded = pyqtSignal(object)
     failed = pyqtSignal(str)
 
@@ -1106,8 +1106,11 @@ class RecoveryTab(QWidget):
                 percent = 50 + int(ratio * 50)
                 label = "Pass 2/2: rereading destination + verification SHA-256"
         self.raw_progress.setValue(percent)
+        phase_percent = int(ratio * 100)
         self.raw_status.setPlainText(
-            f"{label}\n{_fmt_bytes(done)} / {_fmt_bytes(total)}\nOverall progress: {percent}%"
+            f"{label}\n"
+            f"{_fmt_bytes(done)} / {_fmt_bytes(total)}  (pass progress: {phase_percent}%)\n"
+            f"Overall progress: {percent}%"
         )
 
     def _raw_success(self, result):

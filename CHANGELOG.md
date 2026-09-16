@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.5.0-alpha8.2 — fresh-extract Windows launcher hardening
+
+- Fixed a fresh-extract startup failure where `run.bat` blindly invoked `.venv\Scripts\python.exe` even when the release folder had never been bootstrapped. Windows therefore emitted `The system cannot find the path specified.` before the application could start.
+- `run.bat` now detects a missing local virtual environment, invokes `setup.bat`, verifies that the environment was actually created, and only then starts the GUI.
+- `setup.bat` now discovers `py.exe` or `python.exe`, quotes all release-root paths, fails explicitly when Python or dependency installation is unavailable, and is safe to rerun.
+- `run_admin.bat`, `probe.bat`, `image.bat`, `compare.bat`, and `test.bat` use the same bootstrap guard rather than failing with a raw missing-path error.
+- Added release regression coverage for the fresh-extract launcher contract.
+- Retains alpha8.1's 64-bit-safe Qt progress telemetry fix. No GameStick write authority added.
+- **221 automated tests passed; 1 Qt smoke test skipped in this packaging environment because PyQt5 is unavailable.**
+## 0.5.0-alpha8.2 — large-device progress telemetry hardening
+
+- Fixed 32-bit Qt signal overflow in raw-imaging and image-comparison progress reporting. Large byte counts could wrap negative and make the GUI appear to restart even though the underlying Python imaging loop continued correctly.
+- Progress signals now transport Python integer objects end-to-end.
+- Raw imaging now shows pass-local percentage separately from the monotonic overall 3-pass percentage.
+- Added release regression checks preventing the unsafe `pyqtSignal(str, int, int)` form from returning.
+- No source-image or GameStick write authority added.
+
 ## 0.5.0-alpha8 — full-image disagreement mapping
 
 - Added streaming read-only comparison for 2+ equal-sized full acquisitions with complete SHA-256 calculation for every image.

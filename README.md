@@ -1,4 +1,25 @@
-# GameStick Inspector 0.5.0-alpha8
+# GameStick Inspector 0.5.0-alpha8.2
+
+> **alpha8.2 fresh-extract launcher fix:** a newly extracted release no longer assumes `.venv` already exists. The Windows launchers bootstrap the local environment through `setup.bat` when required and fail with explicit diagnostics instead of `The system cannot find the path specified.`
+
+## 0.5.0-alpha8.2 — Windows launcher/bootstrap hardening
+
+- `run.bat` now works from a fresh extraction: if `.venv\Scripts\python.exe` is absent it runs `setup.bat`, verifies success, then launches the GUI.
+- `setup.bat` discovers the Windows Python launcher (`py -3`) first and falls back to `python`, with quoted paths and explicit failure messages.
+- CLI, administrator and test launchers use the same missing-environment bootstrap guard.
+- Existing alpha8.1 large-device progress telemetry hardening remains unchanged.
+- No GameStick write authority is introduced.
+- **221 automated tests passed; 1 Qt smoke test skipped in this packaging environment because PyQt5 is unavailable.**
+
+> **alpha8.1 large-device progress fix:** Qt progress signals now carry Python integer objects instead of 32-bit signed integers, preventing byte counters from wrapping negative above 2 GiB/4 GiB-scale boundaries. Imaging/comparison data paths were already using Python integers; this fixes the GUI telemetry only. Pass and overall progress are now shown separately.
+
+## 0.5.0-alpha8.2 — large-device progress telemetry hardening
+
+- Fixes a real Windows GUI defect observed on a ~59.35 GB GameStick image: `pyqtSignal(..., int, int)` truncated/wrapped large byte counts into signed 32-bit values, producing negative counters and apparent progress resets.
+- Raw-image and full-image-comparison worker progress signals now use Qt `object` payloads so Python's arbitrary-precision integers survive thread delivery unchanged.
+- The imaging engine itself already tracked offsets, hashes and file lengths with Python integers; no acquired bytes or SHA-256 state were being truncated by this UI defect.
+- Progress text now distinguishes **pass progress** from **overall progress**, making the intentional start of Pass 2/3 and Pass 3/3 clearer.
+- No GameStick write authority is introduced.
 
 > **alpha8 full-image consistency mapping:** Inspector can now compare two or more equal-sized full SD acquisitions entirely read-only, hash every input, localize differing 512-byte sectors, and report strict-majority consensus coverage when three or more acquisitions are available. It never silently chooses between a two-image disagreement and does not materialize a consensus image.
 

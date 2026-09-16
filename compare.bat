@@ -1,9 +1,13 @@
 @echo off
-setlocal
-cd /d "%~dp0"
-if not exist ".venv\Scripts\python.exe" (
-  echo Virtual environment not found. Run setup.bat first.
-  exit /b 1
+setlocal EnableExtensions
+cd /d "%~dp0" || exit /b 1
+set "PYTHON_EXE=%~dp0.venv\Scripts\python.exe"
+if not exist "%PYTHON_EXE%" (
+  echo GameStick Inspector environment is missing. Running setup.bat...
+  call "%~dp0setup.bat"
+  if errorlevel 1 exit /b 1
 )
-.venv\Scripts\python.exe src\compare_cli.py %*
-if errorlevel 1 pause
+"%PYTHON_EXE%" "%~dp0src\compare_cli.py" %*
+set "RC=%ERRORLEVEL%"
+if not "%RC%"=="0" pause
+exit /b %RC%
