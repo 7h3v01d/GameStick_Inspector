@@ -15,6 +15,7 @@ import string
 import subprocess
 import xml.etree.ElementTree as ET
 from collections import Counter
+from dataclasses import replace
 from itertools import islice
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,6 +23,12 @@ from typing import Any, Dict, Iterable, List, Optional
 from urllib.parse import quote
 
 from .discovery import build_device_profile_candidate
+from .binary_fingerprint import fingerprint_limits
+from .catalogue_audit import catalogue_audit_limits
+from .read_stability import read_stability_limits
+from .longitudinal import BaselineEvidenceError, compare_to_baseline, load_baseline_probe, longitudinal_limits
+from .dat_inspector import inspect_numbered_dat_profile
+from .wqw import wqw_limits
 from .fs_safety import (
     ForensicPathError,
     assert_contained_non_reparse,
@@ -34,6 +41,8 @@ from .privacy import (
     PRIVACY_LIBRARY_ROOT_NAMES,
     ROM_LIBRARY_ROOT_NAMES,
     canonical_platform_name,
+    privacy_safe_extension,
+    is_privacy_or_numbered_catalog_root,
 )
 from .models import (
     CandidateArtifact,
@@ -79,6 +88,12 @@ _ROM_LIKE_DIRS = set(ROM_LIBRARY_ROOT_NAMES)
 _ARTWORK_LIKE_DIRS = set(ARTWORK_LIBRARY_ROOT_NAMES)
 _PRIVACY_LIBRARY_DIRS = set(PRIVACY_LIBRARY_ROOT_NAMES)
 _TEXT_CONFIG_SUFFIXES = {".ini", ".cfg", ".conf"}
+
+_PROFILE_STRUCTURAL_ROOT_NAMES = {
+    "cubegm", "root.dat", "movie", "music", "bios", "config", "system",
+    "save", "saves", "launcher", "frontend", "menu",
+}
+
 
 # Names found inside media-supplied metadata are untrusted data until a real
 # device format is frozen. Default exported evidence never includes arbitrary
@@ -213,7 +228,7 @@ def _evidence_safe_path(root: Path, path: Path) -> tuple[str, bool]:
     parts = relative.parts
     if not parts:
         return ".", False
-    if parts[0].casefold() in _PRIVACY_LIBRARY_DIRS and len(parts) > 1:
+    if is_privacy_or_numbered_catalog_root(parts[0]) and len(parts) > 1:
         return f"{parts[0]}/<redacted>", True
     return relative.as_posix(), False
 
@@ -318,6 +333,31 @@ def _structure_hash(entries: List[Dict[str, object]]) -> str:
     payload = json.dumps(entries, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
 
+
+
+def _profile_structure_hash(entries: List[Dict[str, object]]) -> str:
+    """Hash only allowlisted root structure for Device Profile identity.
+
+    The general forensic ``structure_sha256`` intentionally describes the root
+    sample more closely. Device Profile identity must instead stay stable across
+    catalogue/content changes and must not dictionary-hash arbitrary private names.
+    File sizes are therefore excluded and unknown root names do not contribute.
+    """
+    safe_entries: List[Dict[str, str]] = []
+    for entry in entries:
+        name = str(entry.get("name", ""))
+        kind = str(entry.get("type", ""))
+        folded = name.casefold()
+        if is_privacy_or_numbered_catalog_root(name):
+            canonical_name = name if folded.isdigit() else folded
+        elif folded in _PROFILE_STRUCTURAL_ROOT_NAMES:
+            canonical_name = folded
+        else:
+            continue
+        safe_entries.append({"name": canonical_name, "type": kind})
+    safe_entries.sort(key=lambda item: (stable_text_key(item["name"]), stable_text_key(item["type"])))
+    payload = json.dumps(safe_entries, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 def _safe_text_prefix(path: Path, limit: int = 64 * 1024) -> str:
     with path.open("rb") as handle:
@@ -643,7 +683,7 @@ def _candidate_artifacts(root: Path) -> tuple[List[CandidateArtifact], List[str]
 
         if sampled.truncated:
             warnings.append(
-                f"Metadata directory enumeration truncated at {safe_current} after "
+                f"Metadata directory enumeration truncated at {_evidence_safe_path(root, safe_current)[0]} after "
                 f"{retained_limit:,} sampled entries."
             )
 
@@ -661,7 +701,7 @@ def _candidate_artifacts(root: Path) -> tuple[List[CandidateArtifact], List[str]
                 continue
 
             if stat.S_ISDIR(st.st_mode):
-                if depth < _MAX_SCAN_DEPTH and name.casefold() not in _ROM_LIKE_DIRS:
+                if depth < _MAX_SCAN_DEPTH and not is_privacy_or_numbered_catalog_root(name):
                     child_dirs.append(safe_path)
                 continue
             if not stat.S_ISREG(st.st_mode):
@@ -718,7 +758,7 @@ def _snapshot_directory(root: Path, directory: Path) -> tuple[DirectorySnapshot,
     safe_directory = assert_contained_non_reparse(root, directory)
     resolved_root = root.resolve(strict=True)
     relative = str(safe_directory.relative_to(resolved_root))
-    privacy_root = safe_directory.name.casefold() in _PRIVACY_LIBRARY_DIRS
+    privacy_root = is_privacy_or_numbered_catalog_root(safe_directory.name)
     redact_filenames = privacy_root
     directory_names: List[str] = []
     file_names: List[str] = []
@@ -761,7 +801,7 @@ def _snapshot_directory(root: Path, directory: Path) -> tuple[DirectorySnapshot,
                 elif len(directory_names) < 150:
                     directory_names.append(name)
             elif stat.S_ISREG(st.st_mode):
-                suffix = Path(name).suffix.casefold() or "<none>"
+                suffix = privacy_safe_extension(name) if privacy_root else (Path(name).suffix.casefold() or "<none>")
                 extensions[suffix] += 1
                 if not redact_filenames and len(file_names) < 150:
                     file_names.append(name)
@@ -1072,7 +1112,7 @@ def _read_issue_messages(messages: Iterable[str]) -> List[str]:
     return [message for message in messages if any(marker.casefold() in message.casefold() for marker in markers)]
 
 
-def inspect_volume(path: str | Path) -> ProbeReport:
+def inspect_volume(path: str | Path, *, baseline_evidence: str | Path | None = None) -> ProbeReport:
     """Probe a mounted GameStick volume without allowing corrupt files to abort progress.
 
     Safety-critical identity/mapping is collected independently from forensic
@@ -1146,11 +1186,59 @@ def inspect_volume(path: str | Path) -> ProbeReport:
         read_errors.append(message)
 
     try:
+        numbered_dat_profile = inspect_numbered_dat_profile(root, entries)
+        if numbered_dat_profile is not None and baseline_evidence:
+            try:
+                baseline_probe, baseline_source = load_baseline_probe(baseline_evidence)
+                comparison = compare_to_baseline(
+                    numbered_dat_profile,
+                    baseline_probe,
+                    source_metadata=baseline_source,
+                )
+                numbered_dat_profile = replace(
+                    numbered_dat_profile,
+                    longitudinal_integrity=comparison,
+                )
+            except BaselineEvidenceError as exc:
+                numbered_dat_profile = replace(
+                    numbered_dat_profile,
+                    longitudinal_integrity={
+                        "schema": "numbered-dat-longitudinal-integrity-v1",
+                        "baseline_status": "BASELINE_REJECTED",
+                        "error_code": str(exc),
+                        "arbitrary_media_names_exported": False,
+                        "baseline_host_path_exported": False,
+                        "new_sampled_region_digest_values_exported": False,
+                    },
+                )
+                warnings.append(f"Longitudinal baseline rejected: {exc}")
+        if numbered_dat_profile is not None:
+            dat_rows = []
+            if numbered_dat_profile.root_catalog is not None:
+                dat_rows.append(numbered_dat_profile.root_catalog)
+            dat_rows.extend(numbered_dat_profile.numbered_catalogs)
+            for dat_item in dat_rows:
+                if dat_item.container_format != "unreadable":
+                    continue
+                error_type = str(dat_item.details.get("error_type") or "OSError")
+                errno = dat_item.details.get("error_errno")
+                suffix = f" (errno={errno})" if isinstance(errno, int) else ""
+                message = f"Could not read numbered-DAT catalogue {dat_item.path}: {error_type}{suffix}"
+                warnings.append(message)
+                read_errors.append(message)
+    except Exception as exc:
+        numbered_dat_profile = None
+        warnings.append(
+            f"Numbered-DAT profile inspection skipped: {_sanitized_exception_summary(exc)}"
+        )
+
+    try:
         device_profile_candidate = build_device_profile_candidate(
             profile=profile,
-            structure_sha256=_structure_hash(entries),
+            structure_sha256=_profile_structure_hash(entries),
             artifacts=artifacts,
             snapshots=snapshots,
+            numbered_dat_profile=numbered_dat_profile,
         )
     except Exception as exc:
         device_profile_candidate = None
@@ -1172,7 +1260,7 @@ def inspect_volume(path: str | Path) -> ProbeReport:
     probe_status = "DEGRADED" if read_errors else "COMPLETE"
 
     return ProbeReport(
-        schema_version=9,
+        schema_version=17,
         generated_at_utc=datetime.now(timezone.utc).isoformat(),
         platform=platform.platform(),
         selected_root=str(root),
@@ -1202,6 +1290,37 @@ def inspect_volume(path: str | Path) -> ProbeReport:
             "device_profile_candidate_read_only": True,
             "device_profile_candidate_additional_filesystem_traversal": False,
             "default_metadata_evidence_exports_arbitrary_names": False,
+            "metadata_scan_enters_privacy_library_roots": False,
+            "privacy_library_extensions_allowlisted": True,
+            "numbered_catalog_directories_privacy_redacted": True,
+            "numbered_dat_inspection_read_only": True,
+            "numbered_dat_archive_extraction_enabled": False,
+            "numbered_dat_recursive_search": False,
+            "numbered_dat_binary_fingerprinting_read_only": True,
+            "numbered_dat_binary_full_file_scan": False,
+            "numbered_dat_wqw_read_only_parser": True,
+            "numbered_dat_wqw_filename_xor": "0xe5",
+            "numbered_dat_control_payload_inflation_bounded": True,
+            "numbered_dat_control_crc_required_for_parse": True,
+            "numbered_dat_catalogue_arbitrary_values_exported": False,
+            "catalogue_consistency_audit_read_only": True,
+            "catalogue_consistency_recursive_traversal": False,
+            "catalogue_consistency_arbitrary_names_exported": False,
+            "catalogue_cross_alias_resolution_private_names_only": True,
+            "catalogue_cross_alias_arbitrary_names_exported": False,
+            **{f"catalogue_consistency_{key}": value for key, value in catalogue_audit_limits().items()},
+            "numbered_dat_read_stability_enabled": True,
+            "numbered_dat_read_stability_digest_values_exported": False,
+            "numbered_dat_read_stability_arbitrary_bytes_exported": False,
+            "numbered_dat_read_stability_raw_control_ranges_sampled_on_validation_failure": True,
+            "numbered_dat_read_stability_plain_stable_requires_usable_control_when_expected": True,
+            **{f"numbered_dat_read_stability_{key}": value for key, value in read_stability_limits().items()},
+            "longitudinal_baseline_comparison_read_only": True,
+            "longitudinal_baseline_host_path_exported": False,
+            "longitudinal_new_sampled_region_digest_values_exported": False,
+            **{f"longitudinal_{key}": value for key, value in longitudinal_limits().items()},
+            **{f"numbered_dat_wqw_{key}": value for key, value in wqw_limits().items()},
+            **{f"numbered_dat_binary_{key}": value for key, value in fingerprint_limits().items()},
             "csv_semantics_can_independently_elevate_probable": False,
             "corrupt_entries_are_nonfatal": True,
             "max_metadata_scan_files": _MAX_SCAN_FILES,
@@ -1220,6 +1339,7 @@ def inspect_volume(path: str | Path) -> ProbeReport:
             "max_hashed_artifact_bytes": _MAX_HASH_BYTES,
         },
         device_profile_candidate=device_profile_candidate,
+        numbered_dat_profile=numbered_dat_profile,
     )
 
 

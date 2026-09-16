@@ -14,6 +14,35 @@ ARTWORK_LIBRARY_ROOT_NAMES = frozenset({
 })
 PRIVACY_LIBRARY_ROOT_NAMES = ROM_LIBRARY_ROOT_NAMES | ARTWORK_LIBRARY_ROOT_NAMES
 
+# Only these suffixes are considered stable structural evidence inside privacy
+# library roots. Arbitrary media-controlled suffix text is collapsed to <other>.
+PRIVACY_STRUCTURAL_EXTENSIONS = frozenset({
+    # Common ROM/container/disc/archive formats
+    ".nes", ".fds", ".sfc", ".smc", ".gb", ".gbc", ".gba", ".n64", ".z64", ".v64",
+    ".nds", ".3ds", ".cia", ".md", ".gen", ".sms", ".gg", ".pce", ".cue", ".bin",
+    ".iso", ".chd", ".pbp", ".cso", ".zip", ".7z", ".rar", ".rom", ".img", ".wad",
+    ".a26", ".a52", ".a78", ".lnx", ".ws", ".wsc", ".ngp", ".ngc", ".col", ".vec",
+    # Common artwork/image formats
+    ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif",
+})
+
+
+def privacy_safe_extension(name: object) -> str:
+    """Return allowlisted structural suffix evidence for privacy-library entries.
+
+    Arbitrary suffix text is media-controlled catalogue data and therefore never
+    exported verbatim. Unknown suffixes collapse to ``<other>``; names without a
+    suffix collapse to ``<none>``.
+    """
+    from pathlib import PurePath
+
+    suffix = PurePath(str(name)).suffix.casefold()
+    if not suffix:
+        return "<none>"
+    if suffix in PRIVACY_STRUCTURAL_EXTENSIONS:
+        return suffix
+    return "<other>"
+
 # Exact, conservative aliases only. These are structural platform identifiers,
 # not fuzzy guesses. Unknown child directory names remain private and contribute
 # counts only.
@@ -99,3 +128,19 @@ def canonical_platform_name(value: object) -> Optional[str]:
 
 def is_privacy_library_root(name: object) -> bool:
     return str(name).strip().casefold() in PRIVACY_LIBRARY_ROOT_NAMES
+
+
+_NUMBERED_CATALOG_ROOT_RE = re.compile(r"^[0-9]{3}$")
+
+def is_numbered_catalog_root(name: object) -> bool:
+    """Return True for observed GameStick numbered catalogue roots (e.g. 000..014).
+
+    Real-device evidence showed that these directories contain game catalogue names,
+    so 0.5.x treats any three-digit top-level catalogue directory as privacy-sensitive
+    by default rather than exporting arbitrary child names.
+    """
+    return bool(_NUMBERED_CATALOG_ROOT_RE.fullmatch(str(name).strip()))
+
+
+def is_privacy_or_numbered_catalog_root(name: object) -> bool:
+    return is_privacy_library_root(name) or is_numbered_catalog_root(name)

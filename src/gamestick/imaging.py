@@ -701,6 +701,63 @@ def _promote_verified_pair(
                 ) from exc
 
 
+def _second_full_source_read(
+    plan: ImagingPlan,
+    *,
+    chunk_size: int,
+    progress: Optional[Callable[[str, int, int], None]],
+    cancelled: Optional[Callable[[], bool]],
+    source_opener: Optional[Callable[[str], BinaryIO]],
+    host_system: str,
+) -> tuple[str, Optional[str], int, Optional[str]]:
+    """Reread the complete physical source without creating a second image.
+
+    Returns ``(status, sha256, bytes_read, error_category)``. A media/read
+    failure is evidence, not a transfer failure, so a successfully verified
+    first image can still be committed with an explicit degraded consistency
+    status. Cancellation and source-identity failures remain fatal.
+    """
+
+    digest = hashlib.sha256()
+    read_total = 0
+    try:
+        if source_opener is None:
+            source = _default_source_opener(
+                plan.source_path,
+                expected_disk_number=plan.disk_number,
+                expected_size=plan.source_size,
+            )
+        else:
+            source = source_opener(plan.source_path)
+
+        with source:
+            remaining = plan.source_size
+            while remaining:
+                if cancelled and cancelled():
+                    raise ImagingCancelled("Second full source reread cancelled by user.")
+                try:
+                    block = source.read(min(chunk_size, remaining))
+                except OSError:
+                    return "SECOND_READ_ERROR", None, read_total, "OS_READ_ERROR"
+                if not block:
+                    return "SECOND_READ_INCOMPLETE", None, read_total, "EARLY_EOF"
+                digest.update(block)
+                read_total += len(block)
+                remaining -= len(block)
+                if progress:
+                    progress("source-verifying", read_total, plan.source_size)
+    except ImagingCancelled:
+        raise
+    except ImagingError:
+        # Opened-handle identity/size failures are safety failures, not media
+        # instability evidence, and must remain fail-closed.
+        raise
+    except (OSError, PermissionError):
+        return "SECOND_READ_ERROR", None, read_total, "SOURCE_OPEN_ERROR"
+
+    return "SECOND_READ_COMPLETE", digest.hexdigest(), read_total, None
+
+
 def _manifest_payload(
     plan: ImagingPlan,
     result: ImageResult,
@@ -710,11 +767,15 @@ def _manifest_payload(
     handle_identity_checked: bool,
 ) -> dict:
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "kind": "gamestick-verified-raw-image",
         "status": "transfer-verified" if result.verified else "unverified",
-        "verification_scope": "destination matches bytes observed during the acquisition pass",
+        "verification_scope": (
+            "destination matches bytes observed during the acquisition pass; an optional second complete source reread "
+            "can establish repeatability across full reads but is not an atomic snapshot guarantee"
+        ),
         "source_snapshot_consistency_verified": False,
+        "source_static_media_consistency_verified": result.source_consistency_status == "MATCHED",
         "source": {
             "physical_path": plan.source_path,
             "disk_number": plan.disk_number,
@@ -743,6 +804,19 @@ def _manifest_payload(
             "reread_sha256": result.reread_sha256,
             "verified": result.verified,
         },
+        "source_consistency": {
+            "status": result.source_consistency_status,
+            "second_full_read_sha256": result.second_source_sha256,
+            "second_full_read_bytes": result.second_source_bytes_read,
+            "error_category": result.second_source_error_category,
+            "meaning": {
+                "NOT_REQUESTED": "A second complete source read was not requested.",
+                "MATCHED": "Two complete source reads produced the same SHA-256.",
+                "MISMATCH": "Two complete source reads produced different SHA-256 values; the source was not static across reads.",
+                "SECOND_READ_INCOMPLETE": "The optional second source read ended before the expected device length.",
+                "SECOND_READ_ERROR": "The optional second source read encountered a read/open error after the first image had already transfer-verified.",
+            }.get(result.source_consistency_status, "Unknown source-consistency state."),
+        },
         "method": {
             "source_open_mode": "read-only",
             "source_identity_revalidated_before_open": source_identity_revalidated,
@@ -751,7 +825,9 @@ def _manifest_payload(
             "chunk_size": chunk_size,
             "destination_flush_and_fsync": True,
             "destination_reread_verification": True,
-            "second_full_source_reread_performed": False,
+            "second_full_source_reread_requested": result.source_consistency_status != "NOT_REQUESTED",
+            "second_full_source_reread_performed": result.source_consistency_status in {"MATCHED", "MISMATCH"},
+            "second_full_source_reread_completed": result.source_consistency_status in {"MATCHED", "MISMATCH"},
             "raw_device_write_performed": False,
         },
         "timing": {
@@ -774,6 +850,7 @@ def create_raw_image(
     volume_root_resolver: Optional[Callable[[str], str]] = None,
     volume_disk_resolver: Optional[Callable[[str], int]] = None,
     host_system: Optional[str] = None,
+    second_full_source_read: bool = False,
 ) -> ImageResult:
     """Create a verified-transfer sector image from a read-only source.
 
@@ -926,6 +1003,38 @@ def create_raw_image(
         # Verify the staged image before touching any existing canonical pair.
         reread_hash = sha256_file(partial, chunk_size=chunk_size, progress=_verify_progress)
         verified = reread_hash == streaming_hash and partial.stat().st_size == plan.source_size
+        if not verified:
+            raise ImagingError(
+                "Staged destination reread verification failed. Existing recovery artifacts were not replaced."
+            )
+
+        source_consistency_status = "NOT_REQUESTED"
+        second_source_sha256 = None
+        second_source_bytes_read = 0
+        second_source_error_category = None
+        if second_full_source_read:
+            # Re-prove source identity before the independent full reread. The
+            # first image is already transfer-verified at this point, but a
+            # content mismatch/read failure is recorded as evidence rather than
+            # being confused with a failed transfer.
+            if identity_resolver is not None or is_windows_physical:
+                revalidate_source_identity(plan, mapping_resolver=identity_resolver)
+            second_status, second_hash, second_bytes, second_error = _second_full_source_read(
+                plan,
+                chunk_size=chunk_size,
+                progress=progress,
+                cancelled=cancelled,
+                source_opener=source_opener,
+                host_system=system,
+            )
+            second_source_sha256 = second_hash
+            second_source_bytes_read = second_bytes
+            second_source_error_category = second_error
+            if second_status == "SECOND_READ_COMPLETE":
+                source_consistency_status = "MATCHED" if second_hash == streaming_hash else "MISMATCH"
+            else:
+                source_consistency_status = second_status
+
         completed = datetime.now(timezone.utc).isoformat()
         result = ImageResult(
             image_path=str(destination.resolve()),
@@ -936,11 +1045,11 @@ def create_raw_image(
             verified=verified,
             started_at_utc=started,
             completed_at_utc=completed,
+            source_consistency_status=source_consistency_status,
+            second_source_sha256=second_source_sha256,
+            second_source_bytes_read=second_source_bytes_read,
+            second_source_error_category=second_source_error_category,
         )
-        if not verified:
-            raise ImagingError(
-                "Staged destination reread verification failed. Existing recovery artifacts were not replaced."
-            )
         # Build+fsync the matching manifest while the old pair is still untouched.
         if image_binding is not None:
             manifest_stage_fd, staged_manifest = secure_stage_on_bound_volume(

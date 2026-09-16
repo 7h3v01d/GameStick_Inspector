@@ -82,6 +82,18 @@ def _report(tmp_path, **mapping_overrides):
     )
 
 
+@pytest.fixture(autouse=True)
+def _isolate_default_windows_destination_disk(monkeypatch):
+    """Keep unit tests off the host's live Windows disk-mapping path.
+
+    Tests that need a specific destination disk pass an explicit resolver and
+    therefore override this fixture. Production defaults are not changed.
+    """
+    import gamestick.safety as safety
+
+    monkeypatch.setattr(safety, "_default_destination_disk_resolver", lambda _drive: 2)
+
+
 def _plan(source: Path, destination: Path, *, source_size=None, overwrite=False):
     size = source.stat().st_size if source_size is None else source_size
     return ImagingPlan(
@@ -103,6 +115,17 @@ def _plan(source: Path, destination: Path, *, source_size=None, overwrite=False)
         source_unique_id_sha256="d" * 64,
         overwrite_existing=overwrite,
     )
+
+
+def _portable_source_opener(path: str):
+    """Open a synthetic test source as an ordinary file on every host OS.
+
+    create_raw_image(host_system=...) controls destination/safety policy, but the
+    production default source opener intentionally keys off the real host OS so
+    physical-drive opens stay Windows-native. Synthetic file tests therefore
+    inject this opener explicitly instead of relying on host spoofing.
+    """
+    return open(path, "rb", buffering=0)
 
 
 def test_physical_drive_path():
@@ -237,6 +260,8 @@ def test_create_raw_image_is_exact_and_verified(tmp_path):
         _plan(source, destination),
         chunk_size=4096,
         progress=lambda phase, done, total: progress.append((phase, done, total)),
+        host_system="Linux",
+        source_opener=_portable_source_opener,
     )
 
     expected = hashlib.sha256(data).hexdigest()
@@ -265,7 +290,7 @@ def test_create_raw_image_rejects_short_source_and_removes_partial(tmp_path):
     plan = _plan(source, destination, source_size=100)
 
     with pytest.raises(ImagingError, match="ended early"):
-        create_raw_image(plan, chunk_size=4)
+        create_raw_image(plan, chunk_size=4, host_system="Linux", source_opener=_portable_source_opener)
 
     assert not destination.exists()
     assert not Path(str(destination) + ".partial").exists()
@@ -278,7 +303,13 @@ def test_create_raw_image_cancellation_removes_partial(tmp_path):
     destination = tmp_path / "factory.img"
 
     with pytest.raises(ImagingCancelled):
-        create_raw_image(_plan(source, destination), chunk_size=1024, cancelled=lambda: True)
+        create_raw_image(
+            _plan(source, destination),
+            chunk_size=1024,
+            cancelled=lambda: True,
+            host_system="Linux",
+            source_opener=_portable_source_opener,
+        )
 
     assert not destination.exists()
     assert not Path(str(destination) + ".partial").exists()
@@ -291,7 +322,7 @@ def test_create_raw_image_refuses_stale_partial(tmp_path):
     Path(str(destination) + ".partial").write_bytes(b"stale")
 
     with pytest.raises(ImagingError, match="partial image already exists"):
-        create_raw_image(_plan(source, destination))
+        create_raw_image(_plan(source, destination), host_system="Linux")
 
 
 def test_create_raw_image_does_not_overwrite_existing_without_permission(tmp_path):
@@ -301,7 +332,7 @@ def test_create_raw_image_does_not_overwrite_existing_without_permission(tmp_pat
     destination.write_bytes(b"old")
 
     with pytest.raises(ImagingError, match="already exists"):
-        create_raw_image(_plan(source, destination))
+        create_raw_image(_plan(source, destination), host_system="Linux")
     assert destination.read_bytes() == b"old"
 
 
@@ -313,7 +344,12 @@ def test_create_raw_image_can_replace_host_side_artifact_when_preflight_allowed(
     manifest = Path(str(destination) + ".manifest.json")
     manifest.write_text("old", encoding="utf-8")
 
-    result = create_raw_image(_plan(source, destination, overwrite=True), chunk_size=3)
+    result = create_raw_image(
+        _plan(source, destination, overwrite=True),
+        chunk_size=3,
+        host_system="Linux",
+        source_opener=_portable_source_opener,
+    )
     assert result.verified
     assert destination.read_bytes() == b"new-data"
     assert json.loads(manifest.read_text(encoding="utf-8"))["status"] == "transfer-verified"
@@ -327,7 +363,7 @@ def test_create_raw_image_refuses_legacy_stale_manifest_temp_before_acquisition(
     temp_manifest.write_text("stale", encoding="utf-8")
 
     with pytest.raises(ImagingError, match="Stale temporary manifest"):
-        create_raw_image(_plan(source, destination))
+        create_raw_image(_plan(source, destination), host_system="Linux")
 
     assert not destination.exists()
     assert temp_manifest.exists()
@@ -342,8 +378,28 @@ def test_execution_reasserts_destination_is_outside_selected_card(tmp_path):
     plan = replace(_plan(source, destination), selected_root=str(card))
 
     with pytest.raises(ValueError, match="outside the selected GameStick"):
-        create_raw_image(plan)
+        create_raw_image(plan, host_system="Linux")
     assert not destination.exists()
+
+
+def test_synthetic_file_imaging_does_not_enter_host_default_source_opener(tmp_path, monkeypatch):
+    import gamestick.imaging as imaging
+
+    source = tmp_path / "source.bin"
+    source.write_bytes(b"portable-synthetic-source")
+    destination = tmp_path / "factory.img"
+
+    def forbidden_default(*args, **kwargs):
+        raise AssertionError("synthetic unit test entered host-dependent default source opener")
+
+    monkeypatch.setattr(imaging, "_default_source_opener", forbidden_default)
+    result = create_raw_image(
+        _plan(source, destination),
+        chunk_size=8,
+        host_system="Linux",
+        source_opener=_portable_source_opener,
+    )
+    assert result.verified is True
 
 
 def test_windows_raw_opener_source_requests_no_generic_write():
@@ -385,7 +441,12 @@ def test_overwrite_verification_failure_preserves_old_authoritative_pair(tmp_pat
 
     monkeypatch.setattr(imaging, "sha256_file", lambda *args, **kwargs: "0" * 64)
     with pytest.raises(ImagingError, match="verification failed"):
-        create_raw_image(_plan(source, destination, overwrite=True), chunk_size=4)
+        create_raw_image(
+            _plan(source, destination, overwrite=True),
+            chunk_size=4,
+            host_system="Linux",
+            source_opener=_portable_source_opener,
+        )
 
     assert destination.read_bytes() == b"OLD-IMAGE"
     assert manifest.read_text(encoding="utf-8") == '{"status":"old-verified"}\n'
@@ -408,7 +469,12 @@ def test_overwrite_manifest_staging_failure_preserves_old_authoritative_pair(tmp
 
     monkeypatch.setattr(imaging, "_write_staged_manifest", fail_manifest)
     with pytest.raises(ImagingError, match="forced manifest emission failure"):
-        create_raw_image(_plan(source, destination, overwrite=True), chunk_size=4)
+        create_raw_image(
+            _plan(source, destination, overwrite=True),
+            chunk_size=4,
+            host_system="Linux",
+            source_opener=_portable_source_opener,
+        )
 
     assert destination.read_bytes() == b"OLD-IMAGE"
     assert manifest.read_text(encoding="utf-8") == '{"status":"old-verified"}\n'
@@ -434,7 +500,12 @@ def test_pair_promotion_failure_restores_old_image_and_matching_manifest(tmp_pat
 
     monkeypatch.setattr(imaging.os, "replace", fail_new_manifest_promotion)
     with pytest.raises(ImagingError, match="pair promotion failed"):
-        create_raw_image(_plan(source, destination, overwrite=True), chunk_size=4)
+        create_raw_image(
+            _plan(source, destination, overwrite=True),
+            chunk_size=4,
+            host_system="Linux",
+            source_opener=_portable_source_opener,
+        )
 
     assert destination.read_bytes() == b"OLD-IMAGE"
     assert manifest.read_text(encoding="utf-8") == '{"status":"old-verified"}\n'
@@ -518,6 +589,7 @@ def test_create_raw_image_revalidates_identity_before_source_open(tmp_path):
             plan,
             source_opener=opener,
             identity_resolver=lambda root: replacement,
+            host_system="Linux",
         )
     assert opened["value"] is False
 
@@ -576,6 +648,7 @@ def test_manifest_records_successful_source_identity_revalidation(tmp_path):
         source_opener=lambda _path: io.BytesIO(data),
         identity_resolver=lambda _root: report.physical_mapping,
         chunk_size=1024,
+        host_system="Linux",
     )
     assert result.verified is True
     manifest = json.loads(Path(result.manifest_path).read_text(encoding="utf-8"))
@@ -637,7 +710,11 @@ def test_windows_raw_staging_survives_destination_junction_swap_without_source_w
         if stage_calls["n"] == 1:
             old = tmp_path / "host-old"
             host.rename(old)
-            host.symlink_to(card, target_is_directory=True)
+            try:
+                host.symlink_to(card, target_is_directory=True)
+            except OSError:
+                old.rename(host)
+                pytest.skip("Directory symlink creation unavailable in this test environment")
         return real_stage(binding, suffix=suffix)
 
     monkeypatch.setattr(imaging, "secure_stage_on_bound_volume", swap_then_stage)
@@ -655,3 +732,132 @@ def test_windows_raw_staging_survives_destination_junction_swap_without_source_w
     assert not (card / "factory.img.manifest.json").exists()
     assert [p for p in card.iterdir() if p.name.startswith(".gamestick-inspector-")] == []
     assert [p for p in safe_stage.iterdir() if p.name.startswith(".gamestick-inspector-")] == []
+
+
+def test_second_full_source_read_match_marks_static_consistency(tmp_path):
+    data = (b"stable-source" * 4096) + b"tail"
+    source = tmp_path / "source.bin"
+    source.write_bytes(data)
+    destination = tmp_path / "factory.img"
+    progress = []
+
+    result = create_raw_image(
+        _plan(source, destination),
+        chunk_size=4096,
+        progress=lambda phase, done, total: progress.append((phase, done, total)),
+        host_system="Linux",
+        source_opener=_portable_source_opener,
+        second_full_source_read=True,
+    )
+
+    expected = hashlib.sha256(data).hexdigest()
+    assert result.verified is True
+    assert result.source_consistency_status == "MATCHED"
+    assert result.second_source_sha256 == expected
+    assert result.second_source_bytes_read == len(data)
+    assert result.second_source_error_category is None
+    assert "source-verifying" in {phase for phase, _, _ in progress}
+
+    manifest = json.loads(Path(str(destination) + ".manifest.json").read_text(encoding="utf-8"))
+    assert manifest["schema_version"] == 3
+    assert manifest["source_snapshot_consistency_verified"] is False
+    assert manifest["source_static_media_consistency_verified"] is True
+    assert manifest["source_consistency"]["status"] == "MATCHED"
+    assert manifest["source_consistency"]["second_full_read_sha256"] == expected
+    assert manifest["method"]["second_full_source_reread_requested"] is True
+    assert manifest["method"]["second_full_source_reread_performed"] is True
+    assert manifest["method"]["second_full_source_reread_completed"] is True
+
+
+def test_second_full_source_read_mismatch_preserves_verified_first_image(tmp_path):
+    first = b"A" * 32768
+    second = b"B" * 32768
+    source = tmp_path / "source.bin"
+    source.write_bytes(first)
+    destination = tmp_path / "factory.img"
+    calls = {"count": 0}
+
+    def changing_source_opener(_path: str):
+        import io
+        calls["count"] += 1
+        return io.BytesIO(first if calls["count"] == 1 else second)
+
+    result = create_raw_image(
+        _plan(source, destination, source_size=len(first)),
+        chunk_size=4096,
+        host_system="Linux",
+        source_opener=changing_source_opener,
+        second_full_source_read=True,
+    )
+
+    assert destination.read_bytes() == first
+    assert result.verified is True
+    assert result.streaming_sha256 == hashlib.sha256(first).hexdigest()
+    assert result.source_consistency_status == "MISMATCH"
+    assert result.second_source_sha256 == hashlib.sha256(second).hexdigest()
+    assert result.second_source_bytes_read == len(second)
+
+    manifest = json.loads(Path(str(destination) + ".manifest.json").read_text(encoding="utf-8"))
+    assert manifest["status"] == "transfer-verified"
+    assert manifest["source_snapshot_consistency_verified"] is False
+    assert manifest["source_static_media_consistency_verified"] is False
+    assert manifest["source_consistency"]["status"] == "MISMATCH"
+    assert manifest["image"]["verified"] is True
+
+
+def test_second_full_source_read_incomplete_is_recorded_not_confused_with_transfer_failure(tmp_path):
+    first = b"A" * 16384
+    second = b"A" * 8192
+    source = tmp_path / "source.bin"
+    source.write_bytes(first)
+    destination = tmp_path / "factory.img"
+    calls = {"count": 0}
+
+    def short_second_opener(_path: str):
+        import io
+        calls["count"] += 1
+        return io.BytesIO(first if calls["count"] == 1 else second)
+
+    result = create_raw_image(
+        _plan(source, destination, source_size=len(first)),
+        chunk_size=4096,
+        host_system="Linux",
+        source_opener=short_second_opener,
+        second_full_source_read=True,
+    )
+
+    assert destination.read_bytes() == first
+    assert result.verified is True
+    assert result.source_consistency_status == "SECOND_READ_INCOMPLETE"
+    assert result.second_source_sha256 is None
+    assert result.second_source_bytes_read == len(second)
+    assert result.second_source_error_category == "EARLY_EOF"
+
+    manifest = json.loads(Path(str(destination) + ".manifest.json").read_text(encoding="utf-8"))
+    assert manifest["source_snapshot_consistency_verified"] is False
+    assert manifest["source_consistency"]["status"] == "SECOND_READ_INCOMPLETE"
+    assert manifest["source_consistency"]["error_category"] == "EARLY_EOF"
+
+
+def test_second_full_source_read_not_requested_keeps_legacy_transfer_semantics(tmp_path):
+    data = b"legacy-default" * 2048
+    source = tmp_path / "source.bin"
+    source.write_bytes(data)
+    destination = tmp_path / "factory.img"
+
+    result = create_raw_image(
+        _plan(source, destination),
+        chunk_size=1024,
+        host_system="Linux",
+        source_opener=_portable_source_opener,
+    )
+
+    assert result.verified is True
+    assert result.source_consistency_status == "NOT_REQUESTED"
+    assert result.second_source_sha256 is None
+    manifest = json.loads(Path(str(destination) + ".manifest.json").read_text(encoding="utf-8"))
+    assert manifest["source_snapshot_consistency_verified"] is False
+    assert manifest["source_consistency"]["status"] == "NOT_REQUESTED"
+    assert manifest["method"]["second_full_source_reread_requested"] is False
+    assert manifest["method"]["second_full_source_reread_performed"] is False
+    assert manifest["method"]["second_full_source_reread_completed"] is False

@@ -118,6 +118,10 @@ class ImageResult:
     verified: bool
     started_at_utc: str
     completed_at_utc: str
+    source_consistency_status: str = "NOT_REQUESTED"
+    second_source_sha256: Optional[str] = None
+    second_source_bytes_read: int = 0
+    second_source_error_category: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -156,6 +160,86 @@ class DeviceProfileCandidate:
     notes: List[str] = field(default_factory=list)
 
 
+
+
+@dataclass(frozen=True)
+class BinaryFingerprintEvidence:
+    schema_version: int
+    sample_strategy: str
+    sample_window_bytes: int
+    sampled_window_count: int
+    sampled_bytes_total: int
+    unique_sampled_bytes: int
+    sample_covers_entire_file: bool
+    short_read_window_count: int = 0
+    windows: List[Dict[str, Any]] = field(default_factory=list)
+    prefix_sha256: Optional[str] = None
+    tail_sha256: Optional[str] = None
+    header_signatures: List[str] = field(default_factory=list)
+    sampled_signature_hits: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    structural_token_hits: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    entropy_bits_per_byte: float = 0.0
+    printable_ratio_ppm: int = 0
+    nul_ratio_ppm: int = 0
+    arbitrary_strings_exported: bool = False
+    full_file_scan_performed: bool = False
+
+
+@dataclass(frozen=True)
+class DatContainerEvidence:
+    path: str
+    role: str
+    size: int
+    container_format: str
+    central_directory_valid: bool
+    declared_member_count: Optional[int] = None
+    file_member_count: int = 0
+    directory_member_count: int = 0
+    central_directory_size: Optional[int] = None
+    zip_comment_length: Optional[int] = None
+    control_members: List[str] = field(default_factory=list)
+    member_extension_counts: Dict[str, int] = field(default_factory=dict)
+    compression_method_counts: Dict[str, int] = field(default_factory=dict)
+    encrypted_member_count: int = 0
+    undecodable_member_name_count: int = 0
+    member_names_redacted: bool = True
+    binary_fingerprint: Optional[BinaryFingerprintEvidence] = None
+    details: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class NumberedDatProfileCandidate:
+    schema_version: int
+    candidate_id: str
+    status: str
+    confidence: str
+    heuristic_score: int
+    profile_family: str
+    root_dat_present: bool
+    numbered_directory_count: int
+    matched_numbered_dat_count: int
+    zip_numbered_dat_count: int
+    wqw_numbered_dat_count: int
+    damaged_wqw_numbered_dat_count: int
+    filelist_control_count: int
+    structural_signature_sha256: str
+    binary_fingerprint_count: int = 0
+    binary_family_assessment: str = "unknown"
+    numbered_catalog_common_prefix_bytes: int = 0
+    root_matches_numbered_prefix_bytes: int = 0
+    common_header_signatures: List[str] = field(default_factory=list)
+    common_sampled_signatures: List[str] = field(default_factory=list)
+    root_catalog: Optional[DatContainerEvidence] = None
+    numbered_catalogs: List[DatContainerEvidence] = field(default_factory=list)
+    catalogue_codes: List[str] = field(default_factory=list)
+    member_names_redacted: bool = True
+    catalogue_relationships: Dict[str, Any] = field(default_factory=dict)
+    catalogue_consistency: Dict[str, Any] = field(default_factory=dict)
+    read_stability: Dict[str, Any] = field(default_factory=dict)
+    longitudinal_integrity: Dict[str, Any] = field(default_factory=dict)
+    notes: List[str] = field(default_factory=list)
+
+
 @dataclass
 class ProbeReport:
     schema_version: int
@@ -177,6 +261,7 @@ class ProbeReport:
     read_errors: List[str] = field(default_factory=list)
     probe_policy: Dict[str, Any] = field(default_factory=dict)
     device_profile_candidate: Optional[DeviceProfileCandidate] = None
+    numbered_dat_profile: Optional[NumberedDatProfileCandidate] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

@@ -1,10 +1,164 @@
-# GameStick Inspector 0.4.0-alpha6
+# GameStick Inspector 0.5.0-alpha8
+
+> **alpha8 full-image consistency mapping:** Inspector can now compare two or more equal-sized full SD acquisitions entirely read-only, hash every input, localize differing 512-byte sectors, and report strict-majority consensus coverage when three or more acquisitions are available. It never silently chooses between a two-image disagreement and does not materialize a consensus image.
+
+## 0.5.0-alpha8 — full-image disagreement mapping
+
+- Adds read-only comparison of **2+ equal-sized `.img`/`.bin` acquisitions** using a streaming 4 MiB chunk pass and 512-byte disagreement refinement.
+- Every input receives a complete SHA-256 during the comparison. Input files are opened read-only and the exported report contains basenames, hashes and structural disagreement metadata, not raw payload bytes.
+- Two-image disagreements are always `SPLIT`: neither image is silently treated as authoritative.
+- With **3+ images**, a sector is `MAJORITY` only when one byte-identical variant has a strict >50% vote. Ties and multi-way disagreements remain `SPLIT`/ambiguous.
+- Reports overall states: `IDENTICAL`, `TWO_IMAGE_DIFFERENCE`, `CONSENSUS_WITH_DISAGREEMENTS`, or `AMBIGUOUS_DISAGREEMENTS`.
+- Disagreement ranges are coalesced and bounded to prevent pathological reports from exploding in size; full aggregate sector counts remain accurate even when the range list is truncated.
+- Adds `compare.bat` / `python src\compare_cli.py` and a Recovery & Images GUI panel for selecting multiple acquisitions, cancelling a long comparison, and writing a host-side JSON consistency map.
+- The report explicitly records `source_writes_performed=false`, `consensus_image_created=false`, and `payload_bytes_exported=false`.
+- No raw restore, consensus-image materialization, DAT regeneration, ROM modification, firmware flashing, or GameStick write authority is introduced.
+- **219 automated tests passed; 1 Qt smoke test skipped in this packaging environment because PyQt5 is unavailable.**
+
+
+> **alpha7 static-media consistency reread:** verified raw imaging can now optionally perform an independent second complete read of the same physical source after the first image has transfer-verified. Matching full-read hashes provide repeatability evidence; mismatches or incomplete rereads are preserved as source-instability evidence rather than being confused with transfer failure.
+
+## 0.5.0-alpha7 — optional second full source reread
+
+- Adds an opt-in second complete physical-source read after the staged image has passed destination reread verification.
+- The second pass opens the GameStick read-only again and hashes exactly the expected physical-device byte length; it never creates or writes a second image on the GameStick.
+- `MATCHED` means the first acquisition hash and independent second full-source hash are identical.
+- `MISMATCH` means both full reads completed but produced different SHA-256 values; the first image remains a valid **transfer-verified acquisition**, while the source is explicitly classified as not static across the two reads.
+- `SECOND_READ_INCOMPLETE` and `SECOND_READ_ERROR` preserve degraded-media evidence without discarding an already transfer-verified first image.
+- Manifest schema advances to **v3** with a dedicated `source_consistency` block. `source_snapshot_consistency_verified` remains `false` because two sequential reads are not an atomic snapshot guarantee; `source_static_media_consistency_verified` is true only when the two complete reads match.
+- GUI adds an optional second-source-read checkbox and a third progress pass. CLI adds `--second-source-read`. The option defaults off to avoid doubling reads on suspect media unless explicitly requested.
+- Raw restore, firmware flashing, DAT regeneration, ROM modification and every GameStick write path remain disabled.
+- **210 automated tests passed; 1 Qt smoke test skipped in this packaging environment because PyQt5 is unavailable.**
+
+## 0.5.0-alpha6.3 — control-payload stability hardening
+
+- Canonical `fileinfo.txt` / `filelist.txt` compressed payload ranges are located from corroborated WQW local/central headers **before** decompression or CRC checking and are independently reread up to three times.
+- `READ_STABLE_WITH_CORRUPT_CONTROL` means the sampled compressed control range itself was repeatable but the control failed integrity/decoding validation. This distinguishes stable corruption from unstable media reads.
+- `READ_STABLE_PARTIAL` means the bounded reads were repeatable but the WQW/container/control structure was incomplete, policy-limited, or otherwise not fully usable.
+- Read-stability evidence exports only canonical status/count metadata. Raw bytes, comparison digests, private filenames and control offsets are not serialized.
+- Longitudinal comparison now surfaces `CURRENT_CONTROL_CORRUPT` and `CURRENT_READ_PARTIAL` rather than collapsing both into `CURRENT_READ_INCOMPLETE`.
+- Probe schema **v17**; numbered-DAT profile schema **v7**; read-stability schema **v2**; longitudinal-integrity schema **v2**. Device Profile candidate/signature contracts remain v10/v9 and the numbered-DAT structural-signature input remains v5.
+- Raw restore, DAT regeneration, ROM modification and every GameStick write path remain disabled.
+- **206 automated tests passed; 1 Qt smoke test skipped in this packaging environment because PyQt5 is unavailable.**
+
+## 0.5.0-alpha6.2 — GUI startup regression hotfix
+
+- Fixes the `AttributeError: 'BrowserTab' object has no attribute 'clear_view'` crash during `MainWindow()` construction.
+- Changing the device path or baseline now clears stale Read-Only Browser results as originally intended.
+- Adds a platform-independent AST regression for the signal target plus a real offscreen Qt `MainWindow()` construction smoke test on hosts with PyQt5.
+- No production probing, WQW, longitudinal comparison, imaging, reporting or safety semantics changed.
+
+## 0.5.0-alpha6.1 — baseline UI stale-report hotfix
+
+- **Hotfix:** selecting or changing the device/baseline after a probe invalidates the old report. Profile Evidence and evidence exports refuse stale reports until **Probe Read-Only** is rerun.
+- **Fail-loud invariant:** if a baseline is selected but a completed numbered-DAT probe unexpectedly contains no longitudinal result, the GUI rejects the report rather than silently showing an empty baseline table.
+- Adds an optional **prior evidence baseline** (`gamestick_evidence.zip` or `gamestick_probe.json`) to the GUI and `probe_cli --baseline`. ZIP baselines are read without extraction and their `MANIFEST.json` commitment for `gamestick_probe.json` must verify before comparison.
+- Baseline input is bounded to 16 MiB of probe JSON, 256 KiB manifest data, 32 ZIP members and a conservative compression-ratio ceiling. Unexpected archive members, traversal paths, encryption, malformed JSON and unsupported probe schemas fail closed.
+- Longitudinal comparison reuses the already-exported binary fingerprint prefix/tail commitments plus privacy-safe WQW/catalogue structure. It adds **no new sampled-byte digest values** and never serializes the host path of the selected baseline.
+- Per-DAT longitudinal states include `UNCHANGED_SINCE_BASELINE`, `CONTENT_REGION_CHANGED_SINCE_BASELINE`, `STRUCTURE_OR_CATALOGUE_CHANGED_SINCE_BASELINE`, `CURRENT_READ_UNSTABLE`, `CURRENT_READ_INCOMPLETE`, and bounded added/missing/not-comparable states.
+- Current-session read stability remains authoritative: a DAT that is unstable or incomplete now cannot be presented as merely “changed since baseline.”
+- Cross-catalogue auditing now calculates resolution rate, primary target code/count and primary-target share. A dominant alias with a small unresolved remainder is classified as `CROSS_CATALOGUE_ALIAS_WITH_RESIDUAL_GAP` instead of generic `MISMATCH_OBSERVED`. Thresholds are explicit and exported as policy: at least 95% of missing names resolved and at least 95% of those resolutions attributable to the primary target.
+- The numbered-DAT structural-signature input intentionally remains **v5**; longitudinal/health diagnostics are excluded from firmware identity. Device Profile candidate/signature contracts also remain v10/v9.
+- Probe schema **v16**; numbered-DAT profile schema **v6**; consistency-audit schema **v3**; longitudinal-integrity schema **v1**; read-stability schema remains **v1**.
+- Raw restore, DAT regeneration, ROM modification and every GameStick write path remain disabled. Frozen imaging/reporting/safety modules remain unchanged.
+- **199/199 automated tests passing** before final packaging audit.
+
+## 0.5.0-alpha5 — read stability & catalogue alias auditor
+
+- Reopens every exact `root.dat` / `NNN/NNN.dat` up to **3 independent times** and compares bounded structural samples: prefix, tail, WQW central-directory region, and verified control-member compressed region when available.
+- Read-stability evidence exports only `READ_STABLE`, `READ_UNSTABLE`, or `READ_INCOMPLETE`, region counts and short/error counts. Sampled bytes and digest values never leave memory.
+- Stability sampling is capped at **64 KiB per structural region per attempt** and at 65 DAT files (root + 64 numbered catalogues); it is not a full-media reread and does not grant write authority.
+- Adds privacy-preserving **cross-catalogue alias resolution**. A local filelist entry absent from its own directory may be resolved against readable entries in other numbered directories; only catalogue-code/count edges are exported.
+- Adds `CROSS_CATALOGUE_ALIAS` and `READ_ERRORS_AND_ALIAS_ACCOUNT_FOR_GAP` descriptive statuses. Unresolved local names, unreferenced physical extras, or local/global disagreements remain `MISMATCH_OBSERVED`.
+- Physical files not in a catalogue are also checked privately against other local filelists so shared content is distinguished from genuinely unreferenced top-level files.
+- Read stability and alias/consistency results are excluded from numbered-DAT structural identity and Device Profile identity.
+- Probe schema **v15**; Device Profile candidate schema **v10**; Device Profile signature input **v9**; numbered-DAT profile schema **v5**; consistency-audit schema **v2**; read-stability schema **v1**.
+- Raw restore, DAT regeneration, ROM modification and every GameStick write path remain disabled.
+- Frozen raw-imaging/output safety modules remain unchanged.
+- **193/193 automated tests passing** before final packaging audit.
+
+## 0.5.0-alpha4 — catalogue consistency auditor
+
+- Adds a **read-only, top-level-only filesystem consistency audit** for numbered catalogue roots. The audit is bounded to 64 catalogues and 10,000 directory entries per catalogue and never recursively walks game trees.
+- Compares private filename sets in memory across: readable physical files, unreadable/rejected directory entries, local `filelist.txt`, global `fileinfo.txt`, and WQW artwork stems. Only counts/statuses leave the audit.
+- Per-catalogue statuses are deliberately descriptive: `MATCHED`, `READ_ERRORS_ACCOUNT_FOR_GAP`, `MISMATCH_OBSERVED`, `CATALOGUE_UNAVAILABLE`, or `PARTIAL`. A mismatch is not automatically labelled firmware corruption because some catalogue codes may be virtual/aliased by design.
+- Distinguishes a local catalogue entry that is merely unreadable on the filesystem from a catalogue name that is not observed at all. This lets damaged-card evidence explain apparent missing-ROM counts without exposing the underlying ROM names.
+- Recognizes `WQW\x03` at offset zero with a missing/invalid WQW central/end structure as `damaged-or-incomplete-wqw` rather than the generic `not-standard-zip`. This is structural evidence only; it does not imply recoverability.
+- Clarifies artwork metrics: `raw_artwork_member_count`, `unique_artwork_stem_count`, and `catalogue_records_with_artwork_count` replace the ambiguous older artwork count label.
+- Filesystem/content mismatch counts remain excluded from Device Profile structural identity; changing private physical catalogue names does not change the numbered-DAT candidate ID or Device Profile signature.
+- Probe schema **v14**; Device Profile candidate schema **v9**; Device Profile signature input **v8**; numbered-DAT profile schema **v4**; consistency-audit schema **v1**.
+- Raw restore, DAT regeneration, ROM modification, and every GameStick write path remain disabled.
+- Frozen raw-imaging/output safety modules remain unchanged.
+- **188/188 automated tests passing** before final packaging audit.
+
+## 0.5.0-alpha3 — WQW catalogue inspector
+
+- Real `root.dat` / `008.dat` evidence confirmed WQW ZIP-derived records (`WQW\x03` local, `WQW\x02` central, `WQW\x01` end) with XOR-`0xE5` member names.
+- Added bounded read-only WQW central/local parsing; no source transformation, extraction, or DAT write path.
+- Canonical `fileinfo.txt` / `filelist.txt` are selectively inflated only after local-header agreement, with hard size limits and CRC-32 verification.
+- Added privacy-safe semicolon record parsing: `filelist` 3-field structure; `fileinfo` 5-field mixed UTF-8/GBK structure; malformed physical lines are counted without repair.
+- Added private global↔platform ROM-name correlation and ROM-stem↔artwork correlation with counts-only exported evidence.
+- WQW-based `PROBABLE` promotion requires CRC-verified, structurally valid control records rather than control filenames alone.
+- Probe schema v13; Device Profile schema v8; Device Profile signature input v7; numbered-DAT profile v3.
+- Production raw-imaging/output safety modules remain unchanged.
+- **181/181 automated tests passing** before final packaging audit.
 
 Safety-first GameStick SD-card inspector and **verified-transfer** full-card imager.
 
-The original prototype treated a GameStick as a mounted collection of files. This rebuild treats it as a **bootable block device plus firmware-specific filesystems and launcher metadata**.
+The original prototype treated a GameStick as a mounted collection of files. This rebuild treats it as a **bootable block device plus firmware-specific filesystems and launcher metadata**. The 0.4.0 line is frozen; 0.5.x now uses real-device evidence to identify and audit the firmware catalogue without enabling any GameStick write path.
 
+## 0.5.0-alpha2.1 — Windows test-harness portability hotfix
 
+This hotfix does **not** change DAT fingerprinting, probing, imaging, reporting, safety, or Device Profile production behavior. It isolates synthetic tests from live Windows physical-disk/Volume-GUID resolution so `test.bat` remains a unit-test run on Windows. Generic file-to-file imaging and evidence-export tests explicitly use the portable host path, while dedicated Windows safety tests continue to exercise Windows logic with injected/fake device resolvers. Symlink-dependent tests skip cleanly when Windows does not permit unprivileged symlink creation.
+
+## 0.5.0-alpha2 — bounded DAT binary fingerprinting
+
+The first real-card 0.5 probe confirmed the numbered-DAT layout but rejected the standard-ZIP hypothesis on every observed `root.dat` / `NNN.dat`. Alpha2 therefore stops guessing at record format and adds a privacy-safe, sample-bounded binary fingerprint layer.
+
+- Keeps the alpha1 exact-path policy: only `root.dat` and exact `NNN/NNN.dat` files derived from the bounded root sample are opened; there is still no recursive DAT search.
+- Reads at most **five 64 KiB windows per DAT** (maximum 320 KiB of fingerprint reads per file, plus the existing bounded ZIP-tail/central-directory inspection when applicable). Small files may be fully covered by one bounded sample; there is no sequential full-file fingerprint scan.
+- Records only derived binary evidence: prefix/tail SHA-256 commitments, exact header-signature semantics, allowlisted sampled signature hits, allowlisted structural-token hits, entropy, printable/NUL ratios, and bounded sample-window offsets. Raw sampled bytes and arbitrary strings are never exported.
+- Detects exact/allowlisted format signatures such as ZIP, 7z, gzip, bzip2, xz, RAR, SquashFS, SQLite, ELF, PNG/JPEG/GIF/BMP, TAR and ISO9660 where their magic is observed in the bounded sample. A sampled signature hit is evidence only, not a claim that the complete DAT is that format.
+- Compares numbered catalogues using private in-process prefix comparison buckets (8/16/32/64 bytes) and reports the largest exact common prefix bucket plus whether `root.dat` shares it. The underlying header bytes are never exported.
+- Reports common exact header signatures and common sampled signatures across numbered catalogues to help distinguish a shared container family from payload-only coincidences.
+- A real-device numbered-DAT layout with enough structural evidence can now outrank incidental generic launcher candidates as `numbered-dat-binary-catalog`, but binary fingerprinting alone is **capped at candidate/medium** and can never produce `probable`.
+- Content commitments, entropy, token/signature counts and private payload changes are **excluded from the numbered-DAT structural signature**; changing private catalogue payload does not create a new firmware-family identity.
+- Probe schema is **v12**; Device Profile candidate schema is **v7**; Device Profile structural-signature input schema is **v6**; numbered-DAT profile schema is **v2**; binary fingerprint schema is **v1**.
+- No DAT extraction, decompression, record parsing, regeneration, ROM modification, raw restore or raw-device write capability is enabled.
+- Frozen recovery/imaging modules remain unchanged.
+
+### What alpha2 is trying to answer
+
+Alpha2 is intentionally descriptive, not interpretive: **what binary family do the real DATs resemble, do all numbered DATs share a common header, does `root.dat` use the same family, and which allowlisted structural signatures appear in bounded samples?** It does not infer catalogue rows or game/artwork relationships yet.
+
+## 0.5.0-alpha1 — numbered-DAT real-device catalogue inspection
+
+Real evidence from the target card showed `root.dat` plus numbered top-level catalogue directories such as `000/000.dat` through `014/014.dat`. Alpha1 adds a hardware-specific, still read-only inspection path for that pattern.
+
+- Detects the numbered-DAT family from the **existing bounded root sample**; it performs no recursive search for DAT files.
+- Opens only exact structural paths: `root.dat` and at most one `NNN/NNN.dat` per three-digit top-level catalogue directory.
+- Treats three-digit catalogue directories as privacy-sensitive: arbitrary game filenames and child-directory names are redacted from snapshots and excluded from generic metadata discovery.
+- Inspects DAT containers with a custom **bounded ZIP central-directory reader** rather than extraction. No archive member is written, extracted, or opened as a filesystem path.
+- Caps central-directory bytes and member counts before parsing; ZIP64 and multi-disk containers are reported as unsupported rather than guessed.
+- Exports only structural archive evidence: bounded member counts, allowlisted member extensions, compression-method counts, and exact canonical control-member names such as `fileinfo.txt` / `filelist.txt`. All other member names remain private.
+- Promotes `root.dat` to the Device Profile launcher/index candidate only when internal container evidence corroborates it; a probable numbered-DAT profile requires a readable ZIP central directory, canonical `fileinfo.txt`, and at least one numbered catalogue containing canonical `filelist.txt`.
+- Device Profile structural signatures incorporate the numbered-DAT **structural signature only**, not private member names, catalogue sizes, or game counts.
+- Probe schema is **v11**; Device Profile candidate schema is **v6**; Device Profile structural-signature input schema is **v5**; numbered-DAT profile schema is **v1**.
+- Raw restore, raw-device write, filesystem modification, DAT regeneration, ROM add/remove, and archive extraction remain disabled.
+- Frozen 0.4.0/0.3.4 recovery-imaging modules remain unchanged.
+
+### What alpha1 does *not* claim
+
+A valid ZIP central directory proves only that the DAT exposes bounded ZIP catalogue structure. Alpha1 does not yet decompress or parse `fileinfo.txt` / `filelist.txt` records, does not infer game-row semantics from private values, and does not write/rebuild a DAT. Those are later read-only correlation steps after the real card confirms the container/control-member format.
+
+## 0.4.0-alpha7 — privacy-root metadata/extension consistency
+
+- Metadata discovery no longer descends into **any** privacy-library root (`Roms`, `image`, `artwork`, `covers`, `boxart`, `snap`, and aliases); private catalogue filenames therefore cannot become `CandidateArtifact.path`, launcher candidates, or Device Profile signature inputs.
+- Metadata truncation diagnostics use the same evidence-safe path formatter as other filesystem warnings.
+- Privacy-root extension summaries export only allowlisted structural suffixes (for example `.nes`, `.zip`, `.png`, `.jpg`); arbitrary media-controlled suffix text is collapsed to `<other>`, while suffixless entries use `<none>`.
+- Arbitrary privacy-library filenames remain local and cannot influence `launcher_path`, `launcher_candidates`, `candidate_id`, or `profile_signature_sha256`.
+- Probe schema is now **v10**; Device Profile candidate schema is **v5**; structural-signature input schema is **v4**.
+- Frozen recovery/imaging safety modules remain unchanged from the 0.3.4-alpha3 baseline.
 
 ## 0.4.0-alpha6 — snapshot-name privacy hardening
 
@@ -132,7 +286,7 @@ A == B + exact byte count
 TRANSFER VERIFIED
 ```
 
-This proves that the destination contains exactly the bytes observed during the acquisition pass. It does **not yet prove that the physical card remained unchanged for the entire acquisition**. A future optional second full source read is planned for static-media comparison.
+This proves that the destination contains exactly the bytes observed during the acquisition pass. Alpha7 can optionally perform a second complete read of the same physical source. If both full-source SHA-256 values match, the manifest records static-media repeatability across those two sequential reads. A mismatch, early EOF, or read error is preserved explicitly as source-instability evidence. This still does **not** claim an atomic snapshot of the card.
 
 ## What remains disabled
 
@@ -230,6 +384,6 @@ Runtime/dev dependencies are pinned in `requirements.txt` / `requirements-dev.tx
 
 ## Validation
 
-Current suite: **147/147 passing** before the final packaging audit.
+Current suite: **172/172 passing** before the final packaging audit.
 
 See `docs/SAFETY.md`, `docs/DESIGN.md` and `docs/ROADMAP.md`.

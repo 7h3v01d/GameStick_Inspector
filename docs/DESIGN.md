@@ -12,7 +12,7 @@ Host-visible files/directories. Corruption here must not invalidate already esta
 Observed layout markers and launcher/index schemas; no unsupported chipset/firmware inference.
 
 ### Layer 3 — launcher/content discovery and consistency model
-0.4.0 begins with read-only launcher/index candidate ranking and content-root discovery. Exact row/path correlation remains disabled until a real-card launcher format is confirmed.
+0.4.0 established privacy-bounded candidate ranking. 0.5.0-alpha3 confirmed the observed WQW catalogue family and added bounded control parsing. 0.5.0-alpha4 added bounded counts-only filesystem/local/global/artwork consistency auditing. 0.5.0-alpha5 added bounded repeated-read stability checks and counts-only cross-catalogue alias resolution. 0.5.0-alpha6 adds manifest-verified longitudinal baseline comparison plus dominant-alias classification while keeping private catalogue names, sampled DAT bytes and baseline host paths out of exported evidence. No catalogue writes are enabled.
 
 ### Layer 4 — transactional modification (future)
 Profile-specific, journalled, verified and rollback-capable writes.
@@ -24,6 +24,9 @@ Profile-specific, journalled, verified and rollback-capable writes.
 - `probe.py` — corruption-tolerant, reparse-contained filesystem evidence plus Windows physical/partition mapping.
 - `profiles.py` — evidence-based filesystem profile matching.
 - `discovery.py` — deterministic Device Profile candidate synthesis and launcher/content-root ranking from already-collected probe evidence; no extra traversal.
+- `dat_inspector.py` — exact-path numbered-DAT orchestration and structural identity.
+- `longitudinal.py` — bounded prior-evidence loading, manifest verification and privacy-safe cross-run DAT comparison.
+- `wqw.py` — bounded read-only WQW central/local record parser, CRC-gated control inflation, mixed-encoding structural parsing and privacy-safe correlation counts.
 - `models.py` — probe and acquisition data contracts.
 - `safety.py` — destructive lockout plus path and physical-destination invariants.
 - `imaging.py` — source identity binding, read-only raw acquisition, transfer verification and transactional image/manifest commit.

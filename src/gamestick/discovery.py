@@ -15,6 +15,7 @@ from .models import (
     DirectorySnapshot,
     LauncherCandidate,
     ProfileMatch,
+    NumberedDatProfileCandidate,
 )
 
 _LAUNCHER_NAME_TERMS = {
@@ -277,8 +278,82 @@ def build_device_profile_candidate(
     structure_sha256: str,
     artifacts: Sequence[CandidateArtifact],
     snapshots: Sequence[DirectorySnapshot],
+    numbered_dat_profile: NumberedDatProfileCandidate | None = None,
 ) -> DeviceProfileCandidate:
     launcher_candidates = rank_launcher_candidates(artifacts)
+
+    if numbered_dat_profile is not None and numbered_dat_profile.root_catalog is not None:
+        root_catalog = numbered_dat_profile.root_catalog
+        dat_candidate: LauncherCandidate | None = None
+        if root_catalog.central_directory_valid:
+            is_wqw = root_catalog.container_format == "wqw-obfuscated-zip"
+            dialect_label = "WQW ZIP-derived" if is_wqw else "standard-ZIP"
+            dat_evidence: List[str] = [
+                "real-device numbered-DAT catalogue family detected",
+                f"root.dat exposes a bounded {dialect_label} central directory",
+            ]
+            if is_wqw:
+                dat_evidence.append("WQW record signatures and XOR-0xE5 member-name decoding corroborated")
+            if "fileinfo.txt" in root_catalog.control_members:
+                dat_evidence.append("canonical global control member observed: fileinfo.txt")
+            if numbered_dat_profile.filelist_control_count:
+                dat_evidence.append(
+                    f"canonical filelist.txt observed in {numbered_dat_profile.filelist_control_count} numbered catalogue(s)"
+                )
+            dat_score = numbered_dat_profile.heuristic_score
+            if numbered_dat_profile.status == "PROBABLE":
+                dat_score = max(90, dat_score)
+                dat_confidence = "high"
+            else:
+                dat_score = min(74, max(50, dat_score))
+                dat_confidence = "medium"
+            dat_candidate = LauncherCandidate(
+                path="root.dat",
+                format_name="numbered-dat-wqw-catalog" if is_wqw else "numbered-dat-zip-catalog",
+                score=min(100, dat_score),
+                confidence=dat_confidence,
+                role_hints=["global-catalog", "launcher-index"],
+                evidence=dat_evidence,
+            )
+        elif (
+            root_catalog.container_format != "unreadable"
+            and root_catalog.binary_fingerprint is not None
+            and numbered_dat_profile.heuristic_score >= 50
+        ):
+            # Real hardware showed the numbered-DAT family while rejecting the
+            # standard-ZIP hypothesis.  The layout can therefore outrank generic
+            # launcher guesses, but binary fingerprinting alone can never make it
+            # probable or claim that the record format is understood.
+            dat_evidence = [
+                "real-device numbered-DAT catalogue layout detected",
+                "root.dat is readable but does not expose the bounded standard-ZIP structure",
+                "bounded binary fingerprint evidence available; record format remains unidentified",
+            ]
+            if numbered_dat_profile.numbered_catalog_common_prefix_bytes:
+                dat_evidence.append(
+                    "numbered DATs share an exact prefix bucket of "
+                    f"{numbered_dat_profile.numbered_catalog_common_prefix_bytes} bytes"
+                )
+            if numbered_dat_profile.common_sampled_signatures:
+                dat_evidence.append(
+                    "common allowlisted sampled signatures: "
+                    + ", ".join(numbered_dat_profile.common_sampled_signatures)
+                )
+            dat_candidate = LauncherCandidate(
+                path="root.dat",
+                format_name="numbered-dat-binary-catalog",
+                score=min(74, max(50, numbered_dat_profile.heuristic_score)),
+                confidence="medium",
+                role_hints=["global-catalog", "launcher-index-candidate"],
+                evidence=dat_evidence,
+            )
+
+        if dat_candidate is not None:
+            launcher_candidates = [dat_candidate, *launcher_candidates]
+            launcher_candidates = sorted(
+                launcher_candidates,
+                key=lambda item: stable_path_score_key(item.score, item.path),
+            )
     content_roots = identify_content_roots(snapshots)
     platforms = _platform_directories(snapshots, content_roots)
 
@@ -291,9 +366,14 @@ def build_device_profile_candidate(
         resolution = "candidate"
 
     notes: List[str] = [
-        "Generated from the existing bounded read-only probe evidence; no additional filesystem traversal was performed.",
-        "Launcher ranking is heuristic until a real-card schema/index format is confirmed and frozen into a hardware-specific profile.",
+        "Generated from bounded read-only probe evidence.",
+        "Generic launcher ranking remains heuristic; numbered-DAT evidence is derived from exact root.dat / NNN/NNN.dat paths with no archive extraction or full-file binary scan.",
     ]
+    if numbered_dat_profile is not None:
+        notes.append(
+            f"Numbered-DAT firmware candidate: {numbered_dat_profile.status.lower()} "
+            f"({numbered_dat_profile.confidence}; heuristic score {numbered_dat_profile.heuristic_score}/100)."
+        )
     if any(root.role == "rom-library" for root in content_roots):
         notes.append("ROM-library root evidence is present.")
     if any(root.role == "artwork-library" for root in content_roots):
@@ -304,13 +384,16 @@ def build_device_profile_candidate(
         notes.append("No launcher/index candidate reached the minimum evidence threshold.")
 
     evidence_payload = {
-        "schema_version": 3,
+        "schema_version": 9,
         "base_profile_id": profile.profile_id,
         "base_profile_score": profile.score,
         "structure_sha256": structure_sha256,
         "launcher_candidates": [asdict(item) for item in launcher_candidates],
         "content_roots": [asdict(item) for item in content_roots],
         "platform_directories": platforms,
+        "numbered_dat_structural_signature_sha256": (
+            numbered_dat_profile.structural_signature_sha256 if numbered_dat_profile is not None else None
+        ),
     }
     canonical = json.dumps(
         evidence_payload,
@@ -321,7 +404,7 @@ def build_device_profile_candidate(
     profile_signature_sha256 = hashlib.sha256(canonical).hexdigest()
 
     return DeviceProfileCandidate(
-        schema_version=4,
+        schema_version=10,
         candidate_id=f"dpv1-candidate-{profile_signature_sha256[:16]}",
         status="CANDIDATE",
         base_profile_id=profile.profile_id,

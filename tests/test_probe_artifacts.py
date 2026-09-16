@@ -104,18 +104,58 @@ def test_rom_root_snapshot_redacts_arbitrary_names_but_keeps_recognized_platform
     assert snapshot.file_extension_counts[".nes"] == 1
 
 
-def test_probe_schema_v9_and_policy(tmp_path):
+def test_probe_schema_v17_and_policy(tmp_path):
     _make_layout(tmp_path)
     report = inspect_volume(tmp_path)
-    assert report.schema_version == 9
+    assert report.schema_version == 17
     assert report.probe_policy["device_write_paths_enabled"] is False
     assert report.probe_policy["raw_device_access_used"] is False
     assert report.probe_policy["rom_tree_recursive_scan"] is False
     assert report.probe_policy["privacy_redacted_filesystem_diagnostics"] is True
     assert report.probe_policy["device_profile_candidate_read_only"] is True
     assert report.probe_policy["device_profile_candidate_additional_filesystem_traversal"] is False
+    assert report.probe_policy["metadata_scan_enters_privacy_library_roots"] is False
+    assert report.probe_policy["privacy_library_extensions_allowlisted"] is True
+    assert report.probe_policy["numbered_catalog_directories_privacy_redacted"] is True
+    assert report.probe_policy["numbered_dat_inspection_read_only"] is True
+    assert report.probe_policy["numbered_dat_archive_extraction_enabled"] is False
+    assert report.probe_policy["numbered_dat_recursive_search"] is False
+    assert report.probe_policy["numbered_dat_binary_fingerprinting_read_only"] is True
+    assert report.probe_policy["numbered_dat_binary_full_file_scan"] is False
+    assert report.probe_policy["numbered_dat_wqw_read_only_parser"] is True
+    assert report.probe_policy["numbered_dat_wqw_filename_xor"] == "0xe5"
+    assert report.probe_policy["numbered_dat_control_payload_inflation_bounded"] is True
+    assert report.probe_policy["numbered_dat_control_crc_required_for_parse"] is True
+    assert report.probe_policy["numbered_dat_catalogue_arbitrary_values_exported"] is False
+    assert report.probe_policy["catalogue_consistency_audit_read_only"] is True
+    assert report.probe_policy["catalogue_consistency_recursive_traversal"] is False
+    assert report.probe_policy["catalogue_consistency_arbitrary_names_exported"] is False
+    assert report.probe_policy["catalogue_consistency_max_catalogues"] == 64
+    assert report.probe_policy["catalogue_consistency_max_entries_per_directory"] == 10_000
+    assert report.probe_policy["catalogue_cross_alias_resolution_private_names_only"] is True
+    assert report.probe_policy["catalogue_cross_alias_arbitrary_names_exported"] is False
+    assert report.probe_policy["numbered_dat_read_stability_enabled"] is True
+    assert report.probe_policy["numbered_dat_read_stability_read_attempts"] == 3
+    assert report.probe_policy["numbered_dat_read_stability_region_sample_bytes"] == 64 * 1024
+    assert report.probe_policy["numbered_dat_read_stability_max_files"] == 65
+    assert report.probe_policy["numbered_dat_read_stability_digest_values_exported"] is False
+    assert report.probe_policy["numbered_dat_read_stability_arbitrary_bytes_exported"] is False
+    assert report.probe_policy["numbered_dat_read_stability_raw_control_ranges_sampled_on_validation_failure"] is True
+    assert report.probe_policy["numbered_dat_read_stability_plain_stable_requires_usable_control_when_expected"] is True
+    assert report.probe_policy["longitudinal_baseline_comparison_read_only"] is True
+    assert report.probe_policy["longitudinal_baseline_host_path_exported"] is False
+    assert report.probe_policy["longitudinal_new_sampled_region_digest_values_exported"] is False
+    assert report.probe_policy["longitudinal_max_baseline_json_bytes"] == 16 * 1024 * 1024
+    assert report.probe_policy["catalogue_consistency_alias_resolution_threshold_ppm"] == 950_000
+    assert report.probe_policy["catalogue_consistency_alias_primary_target_threshold_ppm"] == 950_000
+    assert report.probe_policy["numbered_dat_wqw_max_control_uncompressed_bytes"] == 8 * 1024 * 1024
+    assert report.probe_policy["numbered_dat_wqw_max_control_records"] == 100_000
+    assert report.probe_policy["numbered_dat_wqw_max_control_line_bytes"] == 32 * 1024
+    assert report.probe_policy["numbered_dat_binary_max_sample_windows"] == 5
+    assert report.probe_policy["numbered_dat_binary_max_sampled_bytes_per_file"] == 5 * 64 * 1024
+    assert report.probe_policy["numbered_dat_binary_comparison_prefix_bytes"] == 64
     assert report.device_profile_candidate is not None
-    assert report.device_profile_candidate.schema_version == 4
+    assert report.device_profile_candidate.schema_version == 10
 
 
 def test_headerless_csv_does_not_export_first_data_row_or_create_semantic_evidence(tmp_path):

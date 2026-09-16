@@ -117,7 +117,7 @@ def test_device_profile_candidate_is_deterministic():
     first = build_device_profile_candidate(**kwargs)
     second = build_device_profile_candidate(**kwargs)
     assert first == second
-    assert first.schema_version == 4
+    assert first.schema_version == 10
     assert first.candidate_id.startswith("dpv1-candidate-")
     assert len(first.profile_signature_sha256) == 64
     assert first.launcher_path == "cubegm/game.csv"

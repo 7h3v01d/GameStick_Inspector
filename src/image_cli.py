@@ -27,6 +27,14 @@ def main() -> int:
         action="store_true",
         help="Allow replacement of an existing host-side image/manifest (never permits GameStick writes)",
     )
+    parser.add_argument(
+        "--second-source-read",
+        action="store_true",
+        help=(
+            "After the destination transfer verifies, reread the entire physical source read-only and compare SHA-256. "
+            "A mismatch is recorded as source instability; it does not invalidate the first transfer-verified image."
+        ),
+    )
     args = parser.parse_args()
 
     report = inspect_volume(args.path)
@@ -53,16 +61,23 @@ def main() -> int:
         ratio = done / total if total else 0
         percent = int(ratio * 100)
         if phase != last["phase"] or percent != last["percent"]:
-            label = "imaging" if phase == "imaging" else "verifying"
+            label = {
+                "imaging": "imaging",
+                "verifying": "image verify",
+                "source-verifying": "source reread",
+            }.get(phase, phase)
             print(f"\r{label:10s} {percent:3d}%  {_fmt_bytes(done)} / {_fmt_bytes(total)}", end="", flush=True)
             last["phase"] = phase
             last["percent"] = percent
 
-    result = create_raw_image(plan, progress=progress)
+    result = create_raw_image(plan, progress=progress, second_full_source_read=args.second_source_read)
     print("\n\nVERIFIED")
     print(f"Image:    {result.image_path}")
     print(f"Manifest: {result.manifest_path}")
     print(f"SHA-256:  {result.streaming_sha256}")
+    print(f"Source consistency: {result.source_consistency_status}")
+    if result.second_source_sha256:
+        print(f"Second source SHA-256: {result.second_source_sha256}")
     return 0
 
 

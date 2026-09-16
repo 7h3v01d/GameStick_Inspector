@@ -24,7 +24,7 @@ def _assert_secret_absent_from_export_surfaces(tmp_path: Path, report) -> None:
     assert SECRET_NAME not in summary
 
     destination = tmp_path / "out" / "evidence.zip"
-    saved = write_evidence_bundle(report, destination)
+    saved = write_evidence_bundle(report, destination, host_system="Linux")
     assert SECRET_NAME.encode("utf-8") not in saved.read_bytes()
 
     with zipfile.ZipFile(saved) as archive:
@@ -105,7 +105,7 @@ def _assert_text_absent_from_export_surfaces(tmp_path: Path, report, secret: str
     assert secret not in summary
 
     destination = tmp_path / f"out-{abs(hash(secret))}" / "evidence.zip"
-    saved = write_evidence_bundle(report, destination)
+    saved = write_evidence_bundle(report, destination, host_system="Linux")
     assert secret.encode("utf-8") not in saved.read_bytes()
     with zipfile.ZipFile(saved) as archive:
         contents = b"\n".join(archive.read(name) for name in archive.namelist())
@@ -180,3 +180,79 @@ def test_artwork_child_folder_name_is_private_by_default(tmp_path):
     assert snapshot.file_names_redacted is True
     assert snapshot.directory_names == []
     _assert_text_absent_from_export_surfaces(tmp_path, report, secret_folder)
+
+
+def test_artwork_metadata_candidate_is_not_discovered_or_profiled(tmp_path):
+    card = tmp_path / "card"
+    card.mkdir()
+    for name in ("Roms", "cubegm", "image"):
+        (card / name).mkdir()
+    secret = "Secret Game Name.json"
+    (card / "image" / secret).write_text('{"title":"private"}', encoding="utf-8")
+
+    report = inspect_volume(card)
+    rendered = json.dumps(report.to_dict(), sort_keys=True)
+    assert all("image/" not in artifact.path.replace("\\", "/").casefold() for artifact in report.candidate_artifacts)
+    assert report.device_profile_candidate is not None
+    assert report.device_profile_candidate.launcher_path is None
+    assert secret not in rendered
+    assert "Secret Game Name" not in rendered
+    _assert_text_absent_from_export_surfaces(tmp_path, report, secret)
+
+
+def test_artwork_private_folder_does_not_leak_through_metadata_truncation(tmp_path, monkeypatch):
+    card = tmp_path / "card"
+    card.mkdir()
+    for name in ("Roms", "cubegm", "image"):
+        (card / name).mkdir()
+    secret_folder = "Secret Artwork Folder"
+    folder = card / "image" / secret_folder
+    folder.mkdir()
+    for index in range(12):
+        (folder / f"{index}.json").write_text("{}", encoding="utf-8")
+
+    # A tiny metadata-directory limit would trigger truncation immediately if
+    # metadata discovery incorrectly entered the privacy library.
+    monkeypatch.setattr(probe, "_MAX_SCAN_ENTRIES_PER_DIRECTORY", 2)
+    report = inspect_volume(card)
+
+    assert all(secret_folder not in warning for warning in report.warnings)
+    assert all("image/" not in artifact.path.replace("\\", "/").casefold() for artifact in report.candidate_artifacts)
+    _assert_text_absent_from_export_surfaces(tmp_path, report, secret_folder)
+
+
+def test_privacy_root_arbitrary_suffixes_are_bucketed_as_other(tmp_path):
+    card = tmp_path / "card"
+    card.mkdir()
+    for name in ("Roms", "cubegm", "image"):
+        (card / name).mkdir()
+    rom_secret = "MyPrivateGameTitle"
+    art_secret = "AnotherPrivateArtworkTitle"
+    (card / "Roms" / f"x.{rom_secret}").write_bytes(b"rom")
+    (card / "image" / f"y.{art_secret}").write_bytes(b"art")
+
+    report = inspect_volume(card)
+    roms = next(s for s in report.directory_snapshots if s.path.casefold() == "roms")
+    image = next(s for s in report.directory_snapshots if s.path.casefold() == "image")
+    assert roms.file_extension_counts == {"<other>": 1}
+    assert image.file_extension_counts == {"<other>": 1}
+    _assert_text_absent_from_export_surfaces(tmp_path, report, rom_secret)
+    _assert_text_absent_from_export_surfaces(tmp_path, report, art_secret)
+
+
+def test_private_artwork_metadata_names_do_not_affect_device_profile_signature(tmp_path):
+    def build(card: Path, private_name: str):
+        card.mkdir()
+        for name in ("Roms", "cubegm", "image"):
+            (card / name).mkdir()
+        (card / "image" / private_name).write_text('{"launcher":"private"}', encoding="utf-8")
+        return inspect_volume(card)
+
+    first = build(tmp_path / "first", "Secret Game Name.json")
+    second = build(tmp_path / "second", "Another Private Title.json")
+    assert first.device_profile_candidate is not None
+    assert second.device_profile_candidate is not None
+    assert first.device_profile_candidate.launcher_path is None
+    assert second.device_profile_candidate.launcher_path is None
+    assert first.device_profile_candidate.profile_signature_sha256 == second.device_profile_candidate.profile_signature_sha256
+    assert first.device_profile_candidate.candidate_id == second.device_profile_candidate.candidate_id

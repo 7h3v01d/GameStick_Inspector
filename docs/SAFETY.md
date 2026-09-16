@@ -87,7 +87,7 @@ It does not prove:
 
 > The physical source card was unchanged throughout that pass.
 
-The manifest therefore records `status: transfer-verified` and `source_snapshot_consistency_verified: false`. A future optional second complete source read is planned for static-media comparison.
+The manifest therefore records `status: transfer-verified` and `source_snapshot_consistency_verified: false`. Alpha7 can optionally perform a second complete **read-only** source pass. When both complete source hashes match it records `source_static_media_consistency_verified: true`; a mismatch, early EOF, or read error is recorded separately without being mislabeled as a transfer failure. Because the reads are sequential rather than atomic, `source_snapshot_consistency_verified` remains false even when they match.
 
 ## PowerShell trust policy
 
@@ -116,3 +116,30 @@ Legacy predictable `.tmp` objects are never overwritten. Non-Windows portable/te
 ## Future restore requirements
 
 A future write operation must independently validate physical target identity, dismount/lock appropriately, verify source image/manifest authority, journal the operation, stream/flush safely, reread the target, and survive cancellation/power-loss testing. No raw restore implementation exists in this release.
+## Bounded DAT binary fingerprinting (0.5.0-alpha2)
+
+The 0.5 binary fingerprint layer is read-only and sample-bounded. It opens only exact numbered-DAT structural paths already identified by the bounded root probe, reads at most five 64 KiB fingerprint windows per DAT, never extracts/decompresses a DAT member, never exports raw sampled bytes/arbitrary strings, and never grants write authority. Prefix/tail digests and other content-dependent metrics are excluded from structural profile identity. Binary fingerprint evidence can rank an unknown numbered-DAT layout as a candidate, but cannot independently produce a `probable` launcher resolution.
+
+
+
+## Catalogue consistency audit (0.5.0-alpha4)
+
+The consistency auditor is read-only and intentionally separate from the frozen imaging/output path. It performs one bounded, non-recursive enumeration of each observed three-digit catalogue directory (maximum 64 catalogues and 10,000 entries per catalogue). Names are used only in memory for case-insensitive comparison with private WQW catalogue sets. Exported evidence contains counts, status labels, safe numeric limits and sanitized error types only.
+
+The audit does not open ROM payloads, does not hash or export private filenames, does not recurse into subdirectories, and does not alter Device Profile structural identity. Reparse points remain rejected by the existing forensic-path boundary. A partial/truncated enumeration is explicitly labelled `PARTIAL` and cannot be presented as a complete consistency result.
+
+
+## Read stability and cross-catalogue alias audit (0.5.0-alpha5)
+
+The read-stability auditor is read-only and bounded. It reopens each exact structural DAT three times and reads at most 64 KiB from each canonical region per attempt. For large central/control regions, the bounded sample covers both ends of the region. The implementation compares SHA-256 digests only in memory; digest values and sampled bytes are never exported. A stability result is evidence about the sampled reads only and is **not** equivalent to a full physical-source reread.
+
+Cross-catalogue alias resolution reuses the same bounded top-level directory observations and private WQW filename sets already held in memory. It performs no recursive traversal and opens no ROM payload. Exported alias evidence is limited to three-digit catalogue codes and counts. Reparse/junction protections remain enforced by the existing forensic path layer.
+
+
+## Longitudinal evidence baseline (0.5.0-alpha6)
+
+Baseline comparison is read-only and host-side. A prior evidence ZIP is never extracted and is accepted only after bounded archive validation plus manifest verification of the enclosed probe JSON. JSON and ZIP member sizes are capped, encrypted/unexpected/traversal members are rejected, and the baseline host pathname is not exported.
+
+Cross-run comparison reuses previously exported prefix/tail fingerprint commitments and privacy-safe structural/control metadata. Alpha6 does not add new DAT sampled-region digest commitments. The result therefore distinguishes current-session read stability from evidence changes observed between probe sessions without granting any source-write authority.
+
+Dominant-alias classification is also counts-only. Catalogue filenames remain private in memory; only three-digit catalogue codes, counts and bounded rate fields leave the process.

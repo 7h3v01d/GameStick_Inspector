@@ -14,6 +14,7 @@ def main() -> int:
     parser.add_argument("--output", "-o", help="Write JSON report outside the inspected device")
     parser.add_argument("--bundle", "-b", help="Write evidence ZIP outside the inspected device")
     parser.add_argument("--detect", action="store_true", help="Auto-detect the highest-confidence candidate")
+    parser.add_argument("--baseline", help="Optional prior GameStick evidence ZIP or probe JSON for longitudinal comparison")
     args = parser.parse_args()
 
     path = args.path
@@ -25,7 +26,7 @@ def main() -> int:
     if not path:
         parser.error("provide a mounted volume path or use --detect")
 
-    report = inspect_volume(path)
+    report = inspect_volume(path, baseline_evidence=args.baseline)
     print(json.dumps(report.to_dict(), indent=2, sort_keys=True, ensure_ascii=False))
 
     if args.output:

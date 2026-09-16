@@ -20,19 +20,19 @@ def _report(tmp_path):
 def test_report_writer_rejects_device_destination(tmp_path):
     card, report = _report(tmp_path)
     with pytest.raises(ValueError):
-        write_probe_report(report, card / "probe.json")
+        write_probe_report(report, card / "probe.json", host_system="Linux")
 
 
 def test_evidence_bundle_rejects_device_destination(tmp_path):
     card, report = _report(tmp_path)
     with pytest.raises(ValueError):
-        write_evidence_bundle(report, card / "evidence.zip")
+        write_evidence_bundle(report, card / "evidence.zip", host_system="Linux")
 
 
 def test_evidence_bundle_contains_only_generated_evidence(tmp_path):
     card, report = _report(tmp_path)
     destination = tmp_path / "out" / "evidence.zip"
-    saved = write_evidence_bundle(report, destination)
+    saved = write_evidence_bundle(report, destination, host_system="Linux")
     assert saved == destination.resolve()
 
     with zipfile.ZipFile(saved) as archive:
@@ -44,7 +44,7 @@ def test_evidence_bundle_contains_only_generated_evidence(tmp_path):
             assert manifest["files"][name]["size"] == len(data)
             assert manifest["files"][name]["sha256"] == hashlib.sha256(data).hexdigest()
         payload = json.loads(archive.read("gamestick_probe.json"))
-        assert payload["schema_version"] == 9
+        assert payload["schema_version"] == 17
 
 
 
@@ -61,7 +61,7 @@ def test_headerless_csv_private_values_absent_from_evidence_bundle(tmp_path):
     )
     report = inspect_volume(card)
     destination = tmp_path / "out" / "evidence.zip"
-    saved = write_evidence_bundle(report, destination)
+    saved = write_evidence_bundle(report, destination, host_system="Linux")
 
     with zipfile.ZipFile(saved) as archive:
         payload = archive.read("gamestick_probe.json").decode("utf-8")
@@ -73,10 +73,10 @@ def test_headerless_csv_private_values_absent_from_evidence_bundle(tmp_path):
 def test_probe_report_written_atomically(tmp_path):
     _, report = _report(tmp_path)
     destination = tmp_path / "reports" / "probe.json"
-    saved = write_probe_report(report, destination)
+    saved = write_probe_report(report, destination, host_system="Linux")
     assert saved.exists()
     assert not destination.with_suffix(".json.tmp").exists()
-    assert json.loads(saved.read_text(encoding="utf-8"))["schema_version"] == 9
+    assert json.loads(saved.read_text(encoding="utf-8"))["schema_version"] == 17
 
 
 def test_probe_report_refuses_preexisting_predictable_temp_symlink(tmp_path):
@@ -87,10 +87,13 @@ def test_probe_report_refuses_preexisting_predictable_temp_symlink(tmp_path):
     host.mkdir()
     destination = host / "probe.json"
     legacy_temp = destination.with_suffix(".json.tmp")
-    legacy_temp.symlink_to(important)
+    try:
+        legacy_temp.symlink_to(important)
+    except OSError:
+        pytest.skip("Symlink creation unavailable in this test environment")
 
     with pytest.raises(ValueError, match="legacy predictable temporary object"):
-        write_probe_report(report, destination)
+        write_probe_report(report, destination, host_system="Linux")
 
     assert important.read_bytes() == b"ORIGINAL"
     assert legacy_temp.is_symlink()
@@ -105,10 +108,13 @@ def test_evidence_bundle_refuses_preexisting_predictable_temp_symlink(tmp_path):
     host.mkdir()
     destination = host / "evidence.zip"
     legacy_temp = destination.with_suffix(".zip.tmp")
-    legacy_temp.symlink_to(important)
+    try:
+        legacy_temp.symlink_to(important)
+    except OSError:
+        pytest.skip("Symlink creation unavailable in this test environment")
 
     with pytest.raises(ValueError, match="legacy predictable temporary object"):
-        write_evidence_bundle(report, destination)
+        write_evidence_bundle(report, destination, host_system="Linux")
 
     assert important.read_bytes() == b"ORIGINAL"
     assert legacy_temp.is_symlink()
@@ -130,7 +136,7 @@ def test_report_export_uses_unpredictable_secure_stage_not_legacy_tmp(tmp_path, 
         return fd, temp
 
     monkeypatch.setattr(reporting, "_secure_temp_file", capture)
-    write_probe_report(report, destination)
+    write_probe_report(report, destination, host_system="Linux")
 
     assert seen["temp"] != destination.with_suffix(".json.tmp")
     assert not seen["temp"].exists()
@@ -256,7 +262,11 @@ def test_destination_junction_swap_before_staging_writes_only_to_bound_safe_volu
     def swap_then_stage(path, binding):
         old = tmp_path / "host-old"
         host.rename(old)
-        host.symlink_to(card, target_is_directory=True)
+        try:
+            host.symlink_to(card, target_is_directory=True)
+        except OSError:
+            old.rename(host)
+            pytest.skip("Directory symlink creation unavailable in this test environment")
         return real_make_stage(path, binding)
 
     monkeypatch.setattr(reporting, "_make_stage", swap_then_stage)
@@ -327,7 +337,7 @@ def test_json_and_config_private_names_absent_from_evidence_bundle(tmp_path):
         encoding="utf-8",
     )
     report = inspect_volume(card)
-    saved = write_evidence_bundle(report, tmp_path / "out-private" / "evidence.zip")
+    saved = write_evidence_bundle(report, tmp_path / "out-private" / "evidence.zip", host_system="Linux")
     with zipfile.ZipFile(saved) as archive:
         payload = archive.read("gamestick_probe.json").decode("utf-8")
     for forbidden in (

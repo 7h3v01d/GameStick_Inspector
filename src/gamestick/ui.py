@@ -9,6 +9,7 @@ from PyQt5.QtCore import QThread, pyqtSignal
 from PyQt5.QtWidgets import (
     QApplication,
     QFileDialog,
+    QCheckBox,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -29,11 +30,12 @@ from PyQt5.QtWidgets import (
 from .browser_model import safe_browser_listing
 from .fs_safety import ForensicPathError, assert_contained_non_reparse, lstat_non_reparse
 from .imaging import create_raw_image, preflight_physical_image, sha256_file
+from .image_consistency import compare_full_images
 from .probe import find_candidate_volumes, inspect_volume
 from .reporting import write_evidence_bundle, write_probe_report
 from .windows_privilege import is_process_elevated, relaunch_current_app_elevated
 
-VERSION = "0.4.0-alpha6"
+VERSION = "0.5.0-alpha8"
 _BROWSER_PER_DIRECTORY_LIMIT = 1000
 _BROWSER_TOTAL_NODE_LIMIT = 5000
 
@@ -57,14 +59,17 @@ def _detail_text(details: dict) -> str:
 
 
 class InspectorTab(QWidget):
+    report_invalidated = pyqtSignal()
+
     def __init__(self):
         super().__init__()
         self.report = None
+        self._report_inputs = None
         layout = QVBoxLayout(self)
 
         safety = QLabel(
             "SAFETY-FIRST BUILD — GameStick filesystem writes, raw-device writes, restore, format, firmware flash, "
-            "ROM add/remove, and launcher-database modification remain disabled. Verified raw-device READ imaging is available."
+            "ROM add/remove, DAT regeneration/extraction, and launcher-database modification remain disabled. Verified raw-device READ imaging is available."
         )
         safety.setWordWrap(True)
         safety.setStyleSheet("font-weight: bold; padding: 8px; border: 1px solid #888;")
@@ -86,7 +91,28 @@ class InspectorTab(QWidget):
         row.addWidget(detect)
         row.addWidget(probe)
         select_layout.addLayout(row)
+
+        baseline_row = QHBoxLayout()
+        baseline_label = QLabel("Optional prior evidence baseline:")
+        self.baseline = QLineEdit()
+        self.baseline.setPlaceholderText("Select prior gamestick_evidence.zip or gamestick_probe.json...")
+        baseline_browse = QPushButton("Baseline...")
+        baseline_browse.clicked.connect(self.browse_baseline)
+        baseline_clear = QPushButton("Clear")
+        baseline_clear.clicked.connect(self.baseline.clear)
+        baseline_row.addWidget(baseline_label)
+        baseline_row.addWidget(self.baseline, 1)
+        baseline_row.addWidget(baseline_browse)
+        baseline_row.addWidget(baseline_clear)
+        select_layout.addLayout(baseline_row)
+
+        self.probe_input_state = QLabel("No probe has been run for the current inputs.")
+        self.probe_input_state.setWordWrap(True)
+        select_layout.addWidget(self.probe_input_state)
         layout.addWidget(select_group)
+
+        self.path.textChanged.connect(self._probe_inputs_changed)
+        self.baseline.textChanged.connect(self._probe_inputs_changed)
 
         self.summary = QTextEdit()
         self.summary.setReadOnly(True)
@@ -111,10 +137,40 @@ class InspectorTab(QWidget):
         export_row.addWidget(export_bundle)
         layout.addLayout(export_row)
 
+
+    def _current_probe_inputs(self):
+        return (self.path.text().strip(), self.baseline.text().strip())
+
+    def _probe_inputs_changed(self):
+        if self.report is None:
+            return
+        if self._report_inputs == self._current_probe_inputs():
+            return
+        self.report = None
+        self._report_inputs = None
+        self.probe_input_state.setText(
+            "Probe inputs changed. Run Probe Read-Only again before viewing or exporting evidence."
+        )
+        self.probe_input_state.setStyleSheet("font-weight: bold;")
+        self.report_invalidated.emit()
+
+    def has_current_report(self) -> bool:
+        return self.report is not None and self._report_inputs == self._current_probe_inputs()
+
     def browse(self):
         selected = QFileDialog.getExistingDirectory(self, "Select mounted GameStick volume")
         if selected:
             self.path.setText(selected)
+
+    def browse_baseline(self):
+        selected, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select prior GameStick evidence baseline",
+            "",
+            "GameStick Evidence (*.zip *.json);;ZIP Archives (*.zip);;JSON Files (*.json)",
+        )
+        if selected:
+            self.baseline.setText(selected)
 
     def auto_detect(self):
         candidates = find_candidate_volumes()
@@ -130,12 +186,40 @@ class InspectorTab(QWidget):
         )
 
     def probe(self):
+        selected_root = self.path.text().strip()
+        selected_baseline = self.baseline.text().strip()
         try:
-            report = inspect_volume(self.path.text().strip())
+            report = inspect_volume(
+                selected_root,
+                baseline_evidence=(selected_baseline or None),
+            )
         except Exception as exc:
             QMessageBox.critical(self, "Probe failed", str(exc))
             return
+
+        if (
+            selected_baseline
+            and report.numbered_dat_profile is not None
+            and not report.numbered_dat_profile.longitudinal_integrity
+        ):
+            QMessageBox.critical(
+                self,
+                "Baseline comparison missing",
+                "A prior-evidence baseline was selected, but the completed numbered-DAT probe did not "
+                "contain a longitudinal comparison result. The report has not been accepted or exported. "
+                "Please retry; if this persists, treat it as a software defect.",
+            )
+            return
+
         self.report = report
+        self._report_inputs = (selected_root, selected_baseline)
+        if selected_baseline:
+            longitudinal = report.numbered_dat_profile.longitudinal_integrity if report.numbered_dat_profile else {}
+            baseline_status = longitudinal.get("baseline_status", "NOT_APPLICABLE") if longitudinal else "NOT_APPLICABLE"
+            self.probe_input_state.setText(f"Current report includes selected baseline: {baseline_status}.")
+        else:
+            self.probe_input_state.setText("Current report was generated without a longitudinal baseline.")
+        self.probe_input_state.setStyleSheet("")
         mapping = report.physical_mapping
         lines = [
             f"Probe status: {report.probe_status}",
@@ -157,6 +241,11 @@ class InspectorTab(QWidget):
         ]
         if mapping.mapping_error:
             lines.append(f"Mapping note: {mapping.mapping_error}")
+        if report.numbered_dat_profile is not None and report.numbered_dat_profile.longitudinal_integrity:
+            longitudinal = report.numbered_dat_profile.longitudinal_integrity
+            lines.append(
+                f"Longitudinal baseline: {longitudinal.get('baseline_status', 'unknown')}"
+            )
         if report.read_errors:
             lines.append(f"\nFilesystem read issues: {len(report.read_errors)} (non-fatal; probe continued)")
         if report.warnings:
@@ -208,8 +297,8 @@ class InspectorTab(QWidget):
         self.artifacts.resizeColumnToContents(1)
 
     def export_report(self):
-        if self.report is None:
-            QMessageBox.warning(self, "Nothing to export", "Run a read-only probe first.")
+        if not self.has_current_report():
+            QMessageBox.warning(self, "Nothing current to export", "Run Probe Read-Only for the currently selected device/baseline first.")
             return
         path, _ = QFileDialog.getSaveFileName(
             self, "Save diagnostic report", "gamestick_probe.json", "JSON Files (*.json)"
@@ -223,8 +312,8 @@ class InspectorTab(QWidget):
             QMessageBox.critical(self, "Save failed", str(exc))
 
     def export_bundle(self):
-        if self.report is None:
-            QMessageBox.warning(self, "Nothing to export", "Run a read-only probe first.")
+        if not self.has_current_report():
+            QMessageBox.warning(self, "Nothing current to export", "Run Probe Read-Only for the currently selected device/baseline first.")
             return
         path, _ = QFileDialog.getSaveFileName(
             self, "Save evidence bundle", "gamestick_evidence.zip", "ZIP Archives (*.zip)"
@@ -249,10 +338,11 @@ class StructureTab(QWidget):
     def __init__(self, inspector: InspectorTab):
         super().__init__()
         self.inspector = inspector
+        self.inspector.report_invalidated.connect(self.clear_view)
         layout = QVBoxLayout(self)
         note = QLabel(
-            "Structural evidence only. ROM-root filenames are deliberately not exported; platform/subdirectory "
-            "names and metadata schemas are enough for profiling."
+            "Structural evidence only. ROM/artwork/numbered-catalogue names are privacy-redacted; the 0.5 DAT inspector "
+            "exports only bounded container structure and canonical control-member semantics."
         )
         note.setWordWrap(True)
         layout.addWidget(note)
@@ -270,6 +360,43 @@ class StructureTab(QWidget):
         self.device_profile.setMaximumHeight(145)
         layout.addWidget(self.device_profile)
 
+        self.dat_profile = QTextEdit()
+        self.dat_profile.setReadOnly(True)
+        self.dat_profile.setMaximumHeight(145)
+        layout.addWidget(self.dat_profile)
+
+        self.dat_containers = QTreeWidget()
+        self.dat_containers.setHeaderLabels([
+            "Numbered-DAT catalogue", "Role", "Container", "Members", "Control members",
+            "Member extensions", "Binary header", "Sampled signatures", "Entropy"
+        ])
+        self.dat_containers.setMaximumHeight(190)
+        layout.addWidget(self.dat_containers)
+
+        self.consistency = QTreeWidget()
+        self.consistency.setHeaderLabels([
+            "Catalogue", "Audit status", "Readable files", "Unreadable/rejected",
+            "Local unique", "Global unique", "Present+local+global",
+            "Local missing from observed FS", "Physical not local", "Local not global",
+            "Resolved in other catalogues", "Still unresolved", "Primary alias", "Alias resolution"
+        ])
+        self.consistency.setMaximumHeight(190)
+        layout.addWidget(self.consistency)
+
+        self.stability = QTreeWidget()
+        self.stability.setHeaderLabels([
+            "DAT", "Read status", "Control assessment", "Regions", "Stable", "Unstable", "Incomplete", "Size stable"
+        ])
+        self.stability.setMaximumHeight(170)
+        layout.addWidget(self.stability)
+
+        self.longitudinal = QTreeWidget()
+        self.longitudinal.setHeaderLabels([
+            "DAT", "Baseline status", "Current read", "Prefix", "Tail", "Structure"
+        ])
+        self.longitudinal.setMaximumHeight(175)
+        layout.addWidget(self.longitudinal)
+
         self.launchers = QTreeWidget()
         self.launchers.setHeaderLabels(["Launcher/index candidate", "Format", "Heuristic score (/100)", "Confidence", "Roles", "Evidence"])
         self.launchers.setMaximumHeight(190)
@@ -284,11 +411,28 @@ class StructureTab(QWidget):
         self.snapshots.setHeaderLabels(["Directory", "Child directories", "File extensions", "Sampled", "Truncated", "Filenames redacted"])
         layout.addWidget(self.snapshots, 1)
 
+    def clear_view(self):
+        self.profiles.clear()
+        self.device_profile.clear()
+        self.dat_profile.clear()
+        self.dat_containers.clear()
+        self.consistency.clear()
+        self.stability.clear()
+        self.longitudinal.clear()
+        self.launchers.clear()
+        self.content_roots.clear()
+        self.snapshots.clear()
+
     def refresh(self):
-        report = self.inspector.report
-        if report is None:
-            QMessageBox.information(self, "No probe yet", "Run Probe Read-Only in Device Inspector first.")
+        if not self.inspector.has_current_report():
+            self.clear_view()
+            QMessageBox.information(
+                self,
+                "Probe required",
+                "The device path or baseline selection has changed. Run Probe Read-Only in Device Inspector first.",
+            )
             return
+        report = self.inspector.report
         self.profiles.clear()
         for match in report.profile_candidates:
             QTreeWidgetItem(
@@ -302,8 +446,164 @@ class StructureTab(QWidget):
                 ],
             )
         discovery = report.device_profile_candidate
+        dat_profile = report.numbered_dat_profile
         self.launchers.clear()
         self.content_roots.clear()
+        self.dat_containers.clear()
+        self.consistency.clear()
+        self.stability.clear()
+        self.longitudinal.clear()
+        if dat_profile is None:
+            self.dat_profile.setPlainText("Numbered-DAT firmware profile: not detected in bounded root evidence.")
+        else:
+            root_control_summary = {}
+            if dat_profile.root_catalog is not None:
+                controls = dat_profile.root_catalog.details.get("control_summaries", {})
+                if isinstance(controls, dict):
+                    candidate = controls.get("fileinfo.txt", {})
+                    if isinstance(candidate, dict):
+                        root_control_summary = candidate
+            filelist_valid = 0
+            filelist_malformed = 0
+            artwork_matches = 0
+            for row in dat_profile.numbered_catalogs:
+                controls = row.details.get("control_summaries", {})
+                if not isinstance(controls, dict):
+                    continue
+                summary = controls.get("filelist.txt", {})
+                if not isinstance(summary, dict):
+                    continue
+                filelist_valid += int(summary.get("valid_record_count") or 0)
+                filelist_malformed += int(summary.get("malformed_record_count") or 0)
+                artwork_matches += int(summary.get("catalogue_records_with_artwork_count") or 0)
+            self.dat_profile.setPlainText(
+                "\n".join([
+                    f"Numbered-DAT profile: {dat_profile.candidate_id}",
+                    f"Status: {dat_profile.status}   Confidence: {dat_profile.confidence}   Heuristic score: {dat_profile.heuristic_score}/100",
+                    f"root.dat present: {dat_profile.root_dat_present}",
+                    f"Numbered roots / matching DATs: {dat_profile.numbered_directory_count} / {dat_profile.matched_numbered_dat_count}",
+                    f"Central-directory-readable numbered DATs: {dat_profile.zip_numbered_dat_count}",
+                    f"WQW numbered DATs: {dat_profile.wqw_numbered_dat_count}",
+                    f"Damaged/incomplete WQW numbered DATs: {dat_profile.damaged_wqw_numbered_dat_count}",
+                    f"Verified filelist.txt controls observed: {dat_profile.filelist_control_count}",
+                    f"fileinfo.txt valid / malformed physical records: {root_control_summary.get('valid_record_count', 0)} / {root_control_summary.get('malformed_record_count', 0)}",
+                    f"filelist.txt valid / malformed records (inspected): {filelist_valid} / {filelist_malformed}",
+                    f"ROM-stem / artwork matches (inspected): {artwork_matches}",
+                    f"Binary family assessment: {dat_profile.binary_family_assessment}",
+                    f"Binary fingerprints captured: {dat_profile.binary_fingerprint_count}",
+                    f"Common exact numbered-DAT prefix bucket: {dat_profile.numbered_catalog_common_prefix_bytes} bytes",
+                    f"root.dat matches all numbered DATs through: {dat_profile.root_matches_numbered_prefix_bytes} bytes",
+                    f"Common exact header signatures: {', '.join(dat_profile.common_header_signatures) or 'none observed'}",
+                    f"Common allowlisted sampled signatures: {', '.join(dat_profile.common_sampled_signatures) or 'none observed'}",
+                    f"Global/platform correlation matches: {dat_profile.catalogue_relationships.get('global_filelist_unique_match_count', 0)} / {dat_profile.catalogue_relationships.get('filelist_unique_rom_name_count', 0)} inspected filelist names",
+                    "Consistency audit status counts: " + ", ".join(
+                        f"{key}={value}" for key, value in dat_profile.catalogue_consistency.get("status_counts", {}).items()
+                    ) if dat_profile.catalogue_consistency else "Consistency audit: unavailable",
+                    "Read-stability status counts: " + ", ".join(
+                        f"{key}={value}" for key, value in dat_profile.read_stability.get("status_counts", {}).items()
+                    ) if dat_profile.read_stability else "Read stability: unavailable",
+                    "Longitudinal baseline status: " + str(dat_profile.longitudinal_integrity.get("baseline_status", "not provided"))
+                    if dat_profile.longitudinal_integrity else "Longitudinal baseline: not provided",
+                    "Longitudinal comparison statuses: " + ", ".join(
+                        f"{key}={value}" for key, value in dat_profile.longitudinal_integrity.get("status_counts", {}).items()
+                    ) if dat_profile.longitudinal_integrity and dat_profile.longitudinal_integrity.get("status_counts") else "Longitudinal comparison: unavailable",
+                    f"Cross-catalogue names resolved elsewhere: {dat_profile.catalogue_consistency.get('total_cross_catalogue_resolved_unique_name_count', 0)}" if dat_profile.catalogue_consistency else "Cross-catalogue alias resolution: unavailable",
+                    f"Structural signature SHA-256: {dat_profile.structural_signature_sha256}",
+                    "Member/media strings are privacy-redacted; DATs are never extracted or fully scanned.",
+                ])
+            )
+            audit_rows = dat_profile.catalogue_consistency.get("by_catalogue_code", {})
+            if isinstance(audit_rows, dict):
+                for code in sorted(audit_rows):
+                    row = audit_rows.get(code, {})
+                    if not isinstance(row, dict):
+                        continue
+                    QTreeWidgetItem(
+                        self.consistency,
+                        [
+                            str(code),
+                            str(row.get("audit_status", "?")),
+                            str(row.get("readable_content_file_count", 0)),
+                            f"{row.get('unreadable_entry_count', 0)}/{row.get('rejected_entry_count', 0)}",
+                            str(row.get("filelist_unique_rom_name_count", 0)),
+                            str(row.get("global_unique_rom_name_count", 0)),
+                            str(row.get("present_local_global_unique_match_count", 0)),
+                            str(row.get("filelist_missing_from_filesystem_observation_count", 0)),
+                            str(row.get("readable_not_filelist_count", 0)),
+                            str(row.get("filelist_unique_missing_from_global_count", 0)),
+                            str(row.get("cross_catalogue_resolved_unique_name_count", 0)),
+                            str(row.get("cross_catalogue_unresolved_unique_name_count", 0)),
+                            str(row.get("cross_catalogue_primary_target_code") or "-"),
+                            f"{int(row.get('cross_catalogue_resolution_rate_ppm', 0)) / 10000:.2f}%",
+                        ],
+                    )
+
+            stability_rows = dat_profile.read_stability.get("by_path", {}) if dat_profile.read_stability else {}
+            if isinstance(stability_rows, dict):
+                for path in sorted(stability_rows):
+                    row = stability_rows.get(path, {})
+                    if not isinstance(row, dict):
+                        continue
+                    QTreeWidgetItem(
+                        self.stability,
+                        [
+                            str(path),
+                            str(row.get("status", "?")),
+                            str(row.get("control_failure_assessment", "?")),
+                            str(row.get("region_count", 0)),
+                            str(row.get("stable_region_count", 0)),
+                            str(row.get("unstable_region_count", 0)),
+                            str(row.get("incomplete_region_count", 0)),
+                            str(row.get("size_stable", False)),
+                        ],
+                    )
+
+            longitudinal_rows = dat_profile.longitudinal_integrity.get("by_path", {}) if dat_profile.longitudinal_integrity else {}
+            if isinstance(longitudinal_rows, dict):
+                for path in sorted(longitudinal_rows):
+                    row = longitudinal_rows.get(path, {})
+                    if not isinstance(row, dict):
+                        continue
+                    QTreeWidgetItem(
+                        self.longitudinal,
+                        [
+                            str(path),
+                            str(row.get("status", "?")),
+                            str(row.get("current_read_status", "?")),
+                            str(row.get("prefix_comparison", "?")),
+                            str(row.get("tail_comparison", "?")),
+                            str(row.get("structure_comparison", "?")),
+                        ],
+                    )
+
+            dat_rows = []
+            if dat_profile.root_catalog is not None:
+                dat_rows.append(dat_profile.root_catalog)
+            dat_rows.extend(dat_profile.numbered_catalogs)
+            for container in dat_rows:
+                ext_text = ", ".join(f"{key}:{value}" for key, value in container.member_extension_counts.items())
+                fingerprint = container.binary_fingerprint
+                header_text = ", ".join(fingerprint.header_signatures) if fingerprint else "unavailable"
+                signal_text = (
+                    ", ".join(fingerprint.sampled_signature_hits) if fingerprint else "unavailable"
+                )
+                entropy_text = (
+                    f"{fingerprint.entropy_bits_per_byte:.4f}" if fingerprint else "unavailable"
+                )
+                QTreeWidgetItem(
+                    self.dat_containers,
+                    [
+                        container.path,
+                        container.role,
+                        container.container_format,
+                        str(container.declared_member_count if container.declared_member_count is not None else "?"),
+                        ", ".join(container.control_members) or "none observed",
+                        ext_text,
+                        header_text or "none observed",
+                        signal_text or "none observed",
+                        entropy_text,
+                    ],
+                )
         if discovery is None:
             self.device_profile.setPlainText("Device Profile candidate synthesis unavailable for this probe.")
         else:
@@ -357,6 +657,7 @@ class StructureTab(QWidget):
                 ],
             )
         self.profiles.resizeColumnToContents(0)
+        self.dat_containers.resizeColumnToContents(0)
         self.launchers.resizeColumnToContents(0)
         self.content_roots.resizeColumnToContents(0)
         self.snapshots.resizeColumnToContents(0)
@@ -376,6 +677,12 @@ class BrowserTab(QWidget):
         self.tree = QTreeWidget()
         self.tree.setHeaderLabels(["Name", "Type / size"])
         layout.addWidget(self.tree, 1)
+        self.inspector.report_invalidated.connect(self.clear_view)
+
+    def clear_view(self):
+        """Clear stale browser results when Device Inspector inputs change."""
+        self.tree.clear()
+        self._browser_nodes_remaining = 0
 
     def load(self):
         root_text = self.inspector.path.text().strip()
@@ -444,15 +751,40 @@ class RawImageThread(QThread):
     succeeded = pyqtSignal(object)
     failed = pyqtSignal(str)
 
-    def __init__(self, plan):
+    def __init__(self, plan, *, second_full_source_read: bool = False):
         super().__init__()
         self.plan = plan
+        self.second_full_source_read = second_full_source_read
 
     def run(self):
         try:
             result = create_raw_image(
                 self.plan,
                 progress=lambda phase, done, total: self.progress.emit(phase, done, total),
+                cancelled=self.isInterruptionRequested,
+                second_full_source_read=self.second_full_source_read,
+            )
+            self.succeeded.emit(result)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+class ImageCompareThread(QThread):
+    progress = pyqtSignal(int, int)
+    succeeded = pyqtSignal(object)
+    failed = pyqtSignal(str)
+
+    def __init__(self, image_paths, report_path):
+        super().__init__()
+        self.image_paths = tuple(image_paths)
+        self.report_path = report_path
+
+    def run(self):
+        try:
+            result = compare_full_images(
+                self.image_paths,
+                report_path=self.report_path,
+                progress=lambda done, total: self.progress.emit(done, total),
                 cancelled=self.isInterruptionRequested,
             )
             self.succeeded.emit(result)
@@ -465,6 +797,8 @@ class RecoveryTab(QWidget):
         super().__init__()
         self.inspector = inspector
         self.worker = None
+        self.compare_worker = None
+        self.compare_images = []
         layout = QVBoxLayout(self)
         warning = QLabel(
             "Raw READ imaging is now available after a successful device probe. The GameStick is opened read-only. "
@@ -498,6 +832,16 @@ class RecoveryTab(QWidget):
         output_row.addWidget(self.raw_output, 1)
         output_row.addWidget(choose_output)
         create_layout.addLayout(output_row)
+
+        self.second_source_read = QCheckBox(
+            "After transfer verification, perform a second full READ of the physical source to test static-media consistency"
+        )
+        self.second_source_read.setChecked(False)
+        self.second_source_read.setToolTip(
+            "Optional. Doubles the amount of data read from the source. A mismatch is recorded as source instability; "
+            "the first transfer-verified image remains valid evidence."
+        )
+        create_layout.addWidget(self.second_source_read)
 
         action_row = QHBoxLayout()
         self.create_raw_button = QPushButton("Create & Verify Raw Image")
@@ -537,6 +881,44 @@ class RecoveryTab(QWidget):
         self.result.setMaximumHeight(105)
         inner.addWidget(self.result)
         layout.addWidget(verify_group)
+
+        compare_group = QGroupBox("Compare Full SD Images — READ-ONLY INPUTS")
+        compare_layout = QVBoxLayout(compare_group)
+        self.compare_selection = QLabel("No images selected. Choose at least two equal-sized full acquisitions.")
+        self.compare_selection.setWordWrap(True)
+        compare_layout.addWidget(self.compare_selection)
+        compare_select = QPushButton("Select 2+ .img/.bin files...")
+        compare_select.clicked.connect(self.select_compare_images)
+        compare_layout.addWidget(compare_select)
+
+        compare_report_row = QHBoxLayout()
+        self.compare_report = QLineEdit()
+        self.compare_report.setReadOnly(True)
+        compare_report_button = QPushButton("Choose report .json...")
+        compare_report_button.clicked.connect(self.select_compare_report)
+        compare_report_row.addWidget(self.compare_report, 1)
+        compare_report_row.addWidget(compare_report_button)
+        compare_layout.addLayout(compare_report_row)
+
+        compare_actions = QHBoxLayout()
+        self.compare_button = QPushButton("Analyze Image Consistency")
+        self.compare_button.clicked.connect(self.run_compare_images)
+        self.cancel_compare_button = QPushButton("Cancel")
+        self.cancel_compare_button.setEnabled(False)
+        self.cancel_compare_button.clicked.connect(self.cancel_compare_images)
+        compare_actions.addWidget(self.compare_button)
+        compare_actions.addWidget(self.cancel_compare_button)
+        compare_layout.addLayout(compare_actions)
+
+        self.compare_progress = QProgressBar()
+        self.compare_progress.setRange(0, 100)
+        self.compare_progress.setValue(0)
+        compare_layout.addWidget(self.compare_progress)
+        self.compare_result = QTextEdit()
+        self.compare_result.setReadOnly(True)
+        self.compare_result.setMaximumHeight(150)
+        compare_layout.addWidget(self.compare_result)
+        layout.addWidget(compare_group)
 
         locked = QGroupBox("Destructive Operations — LOCKED")
         locked_layout = QHBoxLayout(locked)
@@ -682,13 +1064,15 @@ class RecoveryTab(QWidget):
             return
 
         self.raw_progress.setValue(0)
+        do_second_read = self.second_source_read.isChecked()
+        pass_total = 3 if do_second_read else 2
         self.raw_status.setPlainText(
             f"Opening {plan.source_path} READ ONLY.\n"
-            "Pass 1/2: creating image and calculating streaming SHA-256..."
+            f"Pass 1/{pass_total}: creating image and calculating streaming SHA-256..."
         )
         self.create_raw_button.setEnabled(False)
         self.cancel_raw_button.setEnabled(True)
-        self.worker = RawImageThread(plan)
+        self.worker = RawImageThread(plan, second_full_source_read=do_second_read)
         self.worker.progress.connect(self._raw_progress)
         self.worker.succeeded.connect(self._raw_success)
         self.worker.failed.connect(self._raw_failure)
@@ -702,13 +1086,25 @@ class RecoveryTab(QWidget):
             self.raw_status.append("Cancellation requested. The current read will stop at the next chunk boundary.")
 
     def _raw_progress(self, phase: str, done: int, total: int):
-        ratio = (done / total) if total else 0.0
-        if phase == "imaging":
-            percent = int(max(0.0, min(1.0, ratio)) * 50)
-            label = "Pass 1/2: imaging source + streaming SHA-256"
+        ratio = max(0.0, min(1.0, (done / total) if total else 0.0))
+        do_second_read = bool(self.worker and self.worker.second_full_source_read)
+        if do_second_read:
+            if phase == "imaging":
+                percent = int(ratio * 34)
+                label = "Pass 1/3: imaging source + streaming SHA-256"
+            elif phase == "verifying":
+                percent = 34 + int(ratio * 33)
+                label = "Pass 2/3: rereading destination + verification SHA-256"
+            else:
+                percent = 67 + int(ratio * 33)
+                label = "Pass 3/3: independent full source reread + SHA-256"
         else:
-            percent = 50 + int(max(0.0, min(1.0, ratio)) * 50)
-            label = "Pass 2/2: rereading destination + verification SHA-256"
+            if phase == "imaging":
+                percent = int(ratio * 50)
+                label = "Pass 1/2: imaging source + streaming SHA-256"
+            else:
+                percent = 50 + int(ratio * 50)
+                label = "Pass 2/2: rereading destination + verification SHA-256"
         self.raw_progress.setValue(percent)
         self.raw_status.setPlainText(
             f"{label}\n{_fmt_bytes(done)} / {_fmt_bytes(total)}\nOverall progress: {percent}%"
@@ -722,13 +1118,15 @@ class RecoveryTab(QWidget):
             f"Manifest: {result.manifest_path}\n"
             f"Bytes: {result.bytes_written}\n"
             f"SHA-256: {result.streaming_sha256}\n"
-            f"Reread match: {result.verified}"
+            f"Reread match: {result.verified}\n"
+            f"Source consistency: {result.source_consistency_status}"
         )
         QMessageBox.information(
             self,
             "Verified transfer image complete",
             "The raw image was created and the destination reread matched the acquired bytes.\n"
-            "This verifies transfer integrity; it does not prove the source card stayed unchanged during acquisition.\n\n"
+            "This verifies transfer integrity.\n"
+            f"Optional source-consistency result: {result.source_consistency_status}.\n\n"
             f"SHA-256:\n{result.streaming_sha256}\n\n"
             f"Manifest:\n{result.manifest_path}",
         )
@@ -743,6 +1141,111 @@ class RecoveryTab(QWidget):
         if self.worker is not None:
             self.worker.deleteLater()
             self.worker = None
+
+    def select_compare_images(self):
+        paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Select full SD images to compare",
+            "",
+            "Disk Images (*.img *.bin);;All Files (*)",
+        )
+        if paths:
+            self.compare_images = list(paths)
+            names = ", ".join(Path(path).name for path in paths)
+            self.compare_selection.setText(f"{len(paths)} image(s): {names}")
+            if not self.compare_report.text().strip():
+                default = str(Path(paths[0]).resolve().parent / "gamestick_image_consistency.json")
+                self.compare_report.setText(default)
+
+    def select_compare_report(self):
+        suggested = self.compare_report.text().strip() or "gamestick_image_consistency.json"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save image consistency report", suggested, "JSON Reports (*.json)"
+        )
+        if path:
+            if not path.lower().endswith(".json"):
+                path += ".json"
+            self.compare_report.setText(path)
+
+    def run_compare_images(self):
+        if len(self.compare_images) < 2:
+            QMessageBox.warning(self, "Images required", "Select at least two complete image files first.")
+            return
+        report = self.compare_report.text().strip()
+        if not report:
+            QMessageBox.warning(self, "Report required", "Choose a host-side JSON report destination first.")
+            return
+        if Path(report).exists():
+            answer = QMessageBox.question(
+                self,
+                "Existing comparison report",
+                "The host-side JSON report already exists. Replace it?\n\nNo input image will be modified.",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                return
+        self.compare_progress.setValue(0)
+        self.compare_result.setPlainText(
+            "Opening selected image files READ ONLY. No source image will be modified.\n"
+            "Comparing complete images and mapping disagreements..."
+        )
+        self.compare_button.setEnabled(False)
+        self.cancel_compare_button.setEnabled(True)
+        self.compare_worker = ImageCompareThread(self.compare_images, report)
+        self.compare_worker.progress.connect(self._compare_progress)
+        self.compare_worker.succeeded.connect(self._compare_success)
+        self.compare_worker.failed.connect(self._compare_failure)
+        self.compare_worker.finished.connect(self._compare_finished)
+        self.compare_worker.start()
+
+    def cancel_compare_images(self):
+        if self.compare_worker is not None and self.compare_worker.isRunning():
+            self.compare_worker.requestInterruption()
+            self.cancel_compare_button.setEnabled(False)
+            self.compare_result.append("Cancellation requested; no incomplete report will be written.")
+
+    def _compare_progress(self, done: int, total: int):
+        percent = int((done / total) * 100) if total else 100
+        self.compare_progress.setValue(max(0, min(100, percent)))
+        self.compare_result.setPlainText(
+            f"Read-only comparison in progress\n{_fmt_bytes(done)} / {_fmt_bytes(total)}\nProgress: {percent}%"
+        )
+
+    def _compare_success(self, result):
+        self.compare_progress.setValue(100)
+        coverage = (
+            "n/a (two-image comparison has no majority authority)"
+            if result.consensus_coverage_percent is None
+            else f"{result.consensus_coverage_percent:.9f}%"
+        )
+        text = (
+            f"Status: {result.status}\n"
+            f"Images: {result.image_count} × {_fmt_bytes(result.size_bytes)}\n"
+            f"Majority sectors: {result.majority_sectors:,}\n"
+            f"Split/ambiguous sectors: {result.split_sectors:,}\n"
+            f"Consensus coverage: {coverage}\n"
+            f"Disagreement ranges: {len(result.disagreement_ranges):,}"
+            + (" (report range list truncated)" if result.ranges_truncated else "")
+            + f"\nReport: {result.report_path}"
+        )
+        self.compare_result.setPlainText(text)
+        QMessageBox.information(
+            self,
+            "Image consistency analysis complete",
+            text + "\n\nNo consensus image was created and no input image was modified.",
+        )
+
+    def _compare_failure(self, message: str):
+        self.compare_result.setPlainText("IMAGE COMPARISON NOT COMPLETED\n\n" + message)
+        QMessageBox.warning(self, "Image comparison stopped", message)
+
+    def _compare_finished(self):
+        self.compare_button.setEnabled(True)
+        self.cancel_compare_button.setEnabled(False)
+        if self.compare_worker is not None:
+            self.compare_worker.deleteLater()
+            self.compare_worker = None
 
     def select_image(self):
         path, _ = QFileDialog.getOpenFileName(self, "Select SD image", "", "Disk Images (*.img *.bin);;All Files (*)")

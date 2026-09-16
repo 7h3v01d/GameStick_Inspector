@@ -7,8 +7,7 @@ def _make_card(root: Path) -> None:
     (root / "Roms").mkdir()
     (root / "cubegm").mkdir()
     (root / "image").mkdir()
-    (root / "004").mkdir()
-    (root / "004" / "00.dat").write_bytes(b"candidate data")
+    (root / "cubegm" / "00.dat").write_bytes(b"candidate data")
 
 
 def test_corrupt_metadata_file_does_not_abort_probe(tmp_path, monkeypatch):
