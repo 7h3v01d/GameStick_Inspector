@@ -80,3 +80,46 @@ def test_non_elevated_candidate_selection_also_refuses_path_helpers(monkeypatch)
 def test_standard_paths_use_windows_semantics_even_on_test_host():
     paths = probe._standard_windows_powershell_paths(r"C:\Windows")
     assert paths[0] == r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+
+
+def test_mapping_runner_retries_timeout_before_succeeding(monkeypatch):
+    monkeypatch.setattr(probe, "_windows_powershell_candidates", lambda: ["trusted.exe"])
+    monkeypatch.setattr(probe.time, "sleep", lambda _seconds: None)
+    calls = []
+
+    def fake_run(args, **kwargs):
+        calls.append(kwargs.get("timeout"))
+        if len(calls) == 1:
+            raise subprocess.TimeoutExpired(args, timeout=kwargs.get("timeout"))
+        return subprocess.CompletedProcess(args, 0, stdout=json.dumps({"DiskNumber": 3}), stderr="")
+
+    monkeypatch.setattr(probe.subprocess, "run", fake_run)
+    payload, backend = probe._run_windows_mapping_script(
+        "ignored", timeout_seconds=30, timeout_attempts=2, retry_delay_seconds=0
+    )
+    assert payload["DiskNumber"] == 3
+    assert backend == "trusted.exe"
+    assert calls == [30, 30]
+
+
+def test_mapping_runner_timeout_is_bounded_and_reported(monkeypatch):
+    monkeypatch.setattr(probe, "_windows_powershell_candidates", lambda: ["trusted.exe"])
+    monkeypatch.setattr(probe.time, "sleep", lambda _seconds: None)
+    calls = []
+
+    def always_timeout(args, **kwargs):
+        calls.append(kwargs.get("timeout"))
+        raise subprocess.TimeoutExpired(args, timeout=kwargs.get("timeout"))
+
+    monkeypatch.setattr(probe.subprocess, "run", always_timeout)
+    try:
+        probe._run_windows_mapping_script(
+            "ignored", timeout_seconds=30, timeout_attempts=2, retry_delay_seconds=0
+        )
+    except RuntimeError as exc:
+        text = str(exc)
+        assert "TimeoutExpired" in text
+        assert "2 attempts" in text
+    else:
+        raise AssertionError("expected RuntimeError")
+    assert calls == [30, 30]

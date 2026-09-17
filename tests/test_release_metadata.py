@@ -9,10 +9,10 @@ def test_release_version_metadata_is_consistent():
     ui = (root / "src" / "gamestick" / "ui.py").read_text(encoding="utf-8")
     readme = (root / "README.md").read_text(encoding="utf-8")
 
-    assert gamestick.__version__ == "0.5.0-alpha8.2"
-    assert 'version = "0.5.0a8.post2"' in pyproject
-    assert 'VERSION = "0.5.0-alpha8.2"' in ui
-    assert readme.startswith("# GameStick Inspector 0.5.0-alpha8.2")
+    assert gamestick.__version__ == "0.5.0-alpha11"
+    assert 'version = "0.5.0a11"' in pyproject
+    assert 'VERSION = "0.5.0-alpha11"' in ui
+    assert readme.startswith("# GameStick Inspector 0.5.0-alpha11")
 
 
 def test_release_owned_tree_contains_no_executable_legacy_package():
@@ -52,6 +52,6 @@ def test_windows_launchers_bootstrap_fresh_extract():
     assert 'python -m venv "%~dp0.venv"' in setup_bat
     assert '"%VENV_PY%" -m pip install -r "%~dp0requirements.txt"' in setup_bat
 
-    for launcher in ("run_admin.bat", "probe.bat", "image.bat", "compare.bat", "test.bat"):
+    for launcher in ("run_admin.bat", "probe.bat", "image.bat", "compare.bat", "fast_compare.bat", "catalogue_compare.bat", "repair_workspace.bat", "test.bat"):
         text = (root / launcher).read_text(encoding="utf-8")
         assert 'call "%~dp0setup.bat"' in text

@@ -34,7 +34,7 @@ def test_main_window_constructs_with_browser_invalidation_slot():
     window = MainWindow()
     try:
         assert hasattr(BrowserTab, "clear_view")
-        assert "0.5.0-alpha8.2" in window.windowTitle()
+        assert "0.5.0-alpha10" in window.windowTitle()
     finally:
         window.close()
         app.processEvents()

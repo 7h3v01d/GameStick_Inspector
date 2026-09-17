@@ -9,6 +9,7 @@ from gamestick.imaging import (
     ImagingCancelled,
     ImagingError,
     ImagingPreflightError,
+    VerifiedStagePreserved,
     create_raw_image,
     physical_drive_path,
     preflight_physical_image,
@@ -861,3 +862,140 @@ def test_second_full_source_read_not_requested_keeps_legacy_transfer_semantics(t
     assert manifest["method"]["second_full_source_reread_requested"] is False
     assert manifest["method"]["second_full_source_reread_performed"] is False
     assert manifest["method"]["second_full_source_reread_completed"] is False
+
+
+def test_late_identity_failure_preserves_transfer_verified_staging(tmp_path):
+    data = b"verified-evidence" * 4096
+    source = tmp_path / "source.bin"
+    source.write_bytes(data)
+    destination = tmp_path / "factory.img"
+    report = _report(
+        tmp_path,
+        disk_size=len(data),
+        partition_size=len(data),
+        partition_offset=0,
+        partitions=[
+            DiskPartitionInfo(
+                partition_number=1,
+                drive_letter="E",
+                offset=0,
+                size=len(data),
+                filesystem="FAT32",
+            )
+        ],
+    )
+    plan = preflight_physical_image(
+        report,
+        destination,
+        host_system="Windows",
+        available_bytes=200 * 1024 * 1024,
+    )
+    calls = {"count": 0}
+
+    def resolver(_root):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return report.physical_mapping
+        return PhysicalMapping(mapping_error="Physical disk mapping unavailable: TimeoutExpired")
+
+    with pytest.raises(VerifiedStagePreserved, match="TRANSFER-VERIFIED STAGING WAS PRESERVED") as caught:
+        create_raw_image(
+            plan,
+            chunk_size=4096,
+            host_system="Linux",
+            source_opener=lambda _path: source.open("rb"),
+            identity_resolver=resolver,
+        )
+
+    assert not destination.exists()
+    text = str(caught.value)
+    marker = "verified staged image: "
+    assert marker in text
+    staged = Path(text.split(marker, 1)[1].split(";", 1)[0].strip())
+    assert staged.is_file()
+    assert staged.read_bytes() == data
+    assert hashlib.sha256(staged.read_bytes()).hexdigest() == hashlib.sha256(data).hexdigest()
+
+
+def test_preverification_identity_failure_does_not_leave_staging(tmp_path):
+    data = b"never-opened" * 1024
+    source = tmp_path / "source.bin"
+    source.write_bytes(data)
+    destination = tmp_path / "factory.img"
+    report = _report(
+        tmp_path,
+        disk_size=len(data),
+        partition_size=len(data),
+        partition_offset=0,
+        partitions=[DiskPartitionInfo(partition_number=1, drive_letter="E", offset=0, size=len(data), filesystem="FAT32")],
+    )
+    plan = preflight_physical_image(
+        report,
+        destination,
+        host_system="Windows",
+        available_bytes=200 * 1024 * 1024,
+    )
+    unavailable = PhysicalMapping(mapping_error="Physical disk mapping unavailable: TimeoutExpired")
+
+    with pytest.raises(ImagingError, match="Source identity revalidation failed"):
+        create_raw_image(
+            plan,
+            host_system="Linux",
+            source_opener=_portable_source_opener,
+            identity_resolver=lambda _root: unavailable,
+        )
+
+    assert not destination.exists()
+    assert not list(tmp_path.glob("*.partial"))
+
+
+def test_second_read_preflight_mapping_timeout_preserves_verified_first_image(tmp_path):
+    data = b"first-image-is-good" * 4096
+    source = tmp_path / "source.bin"
+    source.write_bytes(data)
+    destination = tmp_path / "factory.img"
+    report = _report(
+        tmp_path,
+        disk_size=len(data),
+        partition_size=len(data),
+        partition_offset=0,
+        partitions=[DiskPartitionInfo(partition_number=1, drive_letter="E", offset=0, size=len(data), filesystem="FAT32")],
+    )
+    plan = preflight_physical_image(
+        report,
+        destination,
+        host_system="Windows",
+        available_bytes=200 * 1024 * 1024,
+    )
+    mapping_calls = {"count": 0}
+    source_opens = {"count": 0}
+
+    def resolver(_root):
+        mapping_calls["count"] += 1
+        if mapping_calls["count"] == 1:
+            return report.physical_mapping
+        return PhysicalMapping(mapping_error="Physical disk mapping unavailable: TimeoutExpired")
+
+    def opener(_path):
+        source_opens["count"] += 1
+        return source.open("rb")
+
+    with pytest.raises(VerifiedStagePreserved, match="TRANSFER-VERIFIED STAGING WAS PRESERVED") as caught:
+        create_raw_image(
+            plan,
+            chunk_size=4096,
+            host_system="Linux",
+            source_opener=opener,
+            identity_resolver=resolver,
+            second_full_source_read=True,
+        )
+
+    # Only the first acquisition was opened. The second-source read never starts
+    # after its identity mapping fails, but the verified first image survives.
+    assert source_opens["count"] == 1
+    text = str(caught.value)
+    marker = "verified staged image: "
+    staged = Path(text.split(marker, 1)[1].split(";", 1)[0].strip())
+    assert staged.is_file()
+    assert staged.read_bytes() == data
+    assert not destination.exists()

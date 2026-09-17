@@ -31,11 +31,14 @@ from .browser_model import safe_browser_listing
 from .fs_safety import ForensicPathError, assert_contained_non_reparse, lstat_non_reparse
 from .imaging import create_raw_image, preflight_physical_image, sha256_file
 from .image_consistency import compare_full_images
+from .fast_image_lab import compare_fast_structures
+from .catalogue_image_lab import compare_catalogue_controls
+from .repair_workspace import build_repair_workspace
 from .probe import find_candidate_volumes, inspect_volume
 from .reporting import write_evidence_bundle, write_probe_report
 from .windows_privilege import is_process_elevated, relaunch_current_app_elevated
 
-VERSION = "0.5.0-alpha8.2"
+VERSION = "0.5.0-alpha11"
 _BROWSER_PER_DIRECTORY_LIMIT = 1000
 _BROWSER_TOTAL_NODE_LIMIT = 5000
 
@@ -769,6 +772,83 @@ class RawImageThread(QThread):
             self.failed.emit(str(exc))
 
 
+class FastImageCompareThread(QThread):
+    progress = pyqtSignal(str)
+    succeeded = pyqtSignal(object)
+    failed = pyqtSignal(str)
+
+    def __init__(self, image_a, image_b, report_path):
+        super().__init__()
+        self.image_a = image_a
+        self.image_b = image_b
+        self.report_path = report_path
+
+    def run(self):
+        try:
+            result = compare_fast_structures(
+                self.image_a,
+                self.image_b,
+                report_path=self.report_path,
+                progress=self.progress.emit,
+                cancelled=self.isInterruptionRequested,
+            )
+            self.succeeded.emit(result)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+class CatalogueCompareThread(QThread):
+    progress = pyqtSignal(str)
+    succeeded = pyqtSignal(object)
+    failed = pyqtSignal(str)
+
+    def __init__(self, image_a, image_b, report_path):
+        super().__init__()
+        self.image_a = image_a
+        self.image_b = image_b
+        self.report_path = report_path
+
+    def run(self):
+        try:
+            result = compare_catalogue_controls(
+                self.image_a,
+                self.image_b,
+                report_path=self.report_path,
+                progress=self.progress.emit,
+                cancelled=self.isInterruptionRequested,
+            )
+            self.succeeded.emit(result)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+class RepairWorkspaceThread(QThread):
+    progress = pyqtSignal(str)
+    succeeded = pyqtSignal(object)
+    failed = pyqtSignal(str)
+
+    def __init__(self, golden_image, base_image, output_path, *, overwrite=False):
+        super().__init__()
+        self.golden_image = golden_image
+        self.base_image = base_image
+        self.output_path = output_path
+        self.overwrite = overwrite
+
+    def run(self):
+        try:
+            result = build_repair_workspace(
+                self.golden_image,
+                self.base_image,
+                self.output_path,
+                overwrite=self.overwrite,
+                progress=self.progress.emit,
+                cancelled=self.isInterruptionRequested,
+            )
+            self.succeeded.emit(result)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
 class ImageCompareThread(QThread):
     progress = pyqtSignal(object, object)
     succeeded = pyqtSignal(object)
@@ -797,6 +877,12 @@ class RecoveryTab(QWidget):
         super().__init__()
         self.inspector = inspector
         self.worker = None
+        self.fast_compare_worker = None
+        self.fast_compare_images = []
+        self.catalogue_compare_worker = None
+        self.catalogue_compare_images = []
+        self.repair_workspace_worker = None
+        self.repair_workspace_images = []
         self.compare_worker = None
         self.compare_images = []
         layout = QVBoxLayout(self)
@@ -882,7 +968,125 @@ class RecoveryTab(QWidget):
         inner.addWidget(self.result)
         layout.addWidget(verify_group)
 
-        compare_group = QGroupBox("Compare Full SD Images — READ-ONLY INPUTS")
+        fast_group = QGroupBox("FAST Image Lab — Golden vs Original (metadata/control files only)")
+        fast_layout = QVBoxLayout(fast_group)
+        fast_note = QLabel(
+            "Recommended path. Reads FAT32 directory metadata plus small launcher/control files only — "
+            "it does NOT scan/hash the complete 60 GB images."
+        )
+        fast_note.setWordWrap(True)
+        fast_layout.addWidget(fast_note)
+        self.fast_compare_selection = QLabel("No images selected. Select the golden SanDisk image and original_read1 image.")
+        self.fast_compare_selection.setWordWrap(True)
+        fast_layout.addWidget(self.fast_compare_selection)
+        fast_select = QPushButton("Select Golden + Original Images...")
+        fast_select.clicked.connect(self.select_fast_compare_images)
+        fast_layout.addWidget(fast_select)
+
+        fast_report_row = QHBoxLayout()
+        self.fast_compare_report = QLineEdit()
+        self.fast_compare_report.setReadOnly(True)
+        fast_report_button = QPushButton("Choose fast report .json...")
+        fast_report_button.clicked.connect(self.select_fast_compare_report)
+        fast_report_row.addWidget(self.fast_compare_report, 1)
+        fast_report_row.addWidget(fast_report_button)
+        fast_layout.addLayout(fast_report_row)
+
+        fast_actions = QHBoxLayout()
+        self.fast_compare_button = QPushButton("FAST Compare Structure + Launcher Controls")
+        self.fast_compare_button.clicked.connect(self.run_fast_compare_images)
+        self.cancel_fast_compare_button = QPushButton("Cancel")
+        self.cancel_fast_compare_button.setEnabled(False)
+        self.cancel_fast_compare_button.clicked.connect(self.cancel_fast_compare_images)
+        fast_actions.addWidget(self.fast_compare_button)
+        fast_actions.addWidget(self.cancel_fast_compare_button)
+        fast_layout.addLayout(fast_actions)
+        self.fast_compare_result = QTextEdit()
+        self.fast_compare_result.setReadOnly(True)
+        self.fast_compare_result.setMaximumHeight(150)
+        fast_layout.addWidget(self.fast_compare_result)
+        layout.addWidget(fast_group)
+
+        catalogue_group = QGroupBox("SURGICAL Catalogue Lab — RECOMMENDED NEXT")
+        catalogue_layout = QVBoxLayout(catalogue_group)
+        catalogue_note = QLabel(
+            "Reads only the WQW central directory plus filelist.txt from 000-014 and fileinfo.txt from ROOT.DAT. "
+            "ROM payloads and artwork are never scanned. Designed for seconds/minutes, not hours."
+        )
+        catalogue_note.setWordWrap(True)
+        catalogue_layout.addWidget(catalogue_note)
+        self.catalogue_compare_selection = QLabel("No images selected. Select golden/reference + original_read1.")
+        self.catalogue_compare_selection.setWordWrap(True)
+        catalogue_layout.addWidget(self.catalogue_compare_selection)
+        catalogue_select = QPushButton("Select Golden + Original Images...")
+        catalogue_select.clicked.connect(self.select_catalogue_compare_images)
+        catalogue_layout.addWidget(catalogue_select)
+
+        catalogue_report_row = QHBoxLayout()
+        self.catalogue_compare_report = QLineEdit()
+        self.catalogue_compare_report.setReadOnly(True)
+        catalogue_report_button = QPushButton("Choose catalogue report .json...")
+        catalogue_report_button.clicked.connect(self.select_catalogue_compare_report)
+        catalogue_report_row.addWidget(self.catalogue_compare_report, 1)
+        catalogue_report_row.addWidget(catalogue_report_button)
+        catalogue_layout.addLayout(catalogue_report_row)
+
+        catalogue_actions = QHBoxLayout()
+        self.catalogue_compare_button = QPushButton("Compare 000-014 Catalogues — Surgical")
+        self.catalogue_compare_button.clicked.connect(self.run_catalogue_compare_images)
+        self.cancel_catalogue_compare_button = QPushButton("Cancel")
+        self.cancel_catalogue_compare_button.setEnabled(False)
+        self.cancel_catalogue_compare_button.clicked.connect(self.cancel_catalogue_compare_images)
+        catalogue_actions.addWidget(self.catalogue_compare_button)
+        catalogue_actions.addWidget(self.cancel_catalogue_compare_button)
+        catalogue_layout.addLayout(catalogue_actions)
+        self.catalogue_compare_result = QTextEdit()
+        self.catalogue_compare_result.setReadOnly(True)
+        self.catalogue_compare_result.setMaximumHeight(170)
+        catalogue_layout.addWidget(self.catalogue_compare_result)
+        layout.addWidget(catalogue_group)
+
+        repair_group = QGroupBox("FAST Repair Workspace — Host-side overlay only")
+        repair_layout = QVBoxLayout(repair_group)
+        repair_note = QLabel(
+            "Detects damaged catalogue controls in the repair base, copies only same-size VERIFIED replacements "
+            "from the golden image into a small .gsworkspace archive, and leaves both source images untouched. "
+            "No 60 GB copy and no GameStick write is performed."
+        )
+        repair_note.setWordWrap(True)
+        repair_layout.addWidget(repair_note)
+        self.repair_workspace_selection = QLabel("No images selected. Select golden/reference + original_read1 repair base.")
+        self.repair_workspace_selection.setWordWrap(True)
+        repair_layout.addWidget(self.repair_workspace_selection)
+        repair_select = QPushButton("Select Golden + Repair Base Images...")
+        repair_select.clicked.connect(self.select_repair_workspace_images)
+        repair_layout.addWidget(repair_select)
+
+        repair_output_row = QHBoxLayout()
+        self.repair_workspace_output = QLineEdit()
+        self.repair_workspace_output.setReadOnly(True)
+        repair_output_button = QPushButton("Choose .gsworkspace output...")
+        repair_output_button.clicked.connect(self.select_repair_workspace_output)
+        repair_output_row.addWidget(self.repair_workspace_output, 1)
+        repair_output_row.addWidget(repair_output_button)
+        repair_layout.addLayout(repair_output_row)
+
+        repair_actions = QHBoxLayout()
+        self.repair_workspace_button = QPushButton("Build Verified Repair Workspace")
+        self.repair_workspace_button.clicked.connect(self.run_repair_workspace)
+        self.cancel_repair_workspace_button = QPushButton("Cancel")
+        self.cancel_repair_workspace_button.setEnabled(False)
+        self.cancel_repair_workspace_button.clicked.connect(self.cancel_repair_workspace)
+        repair_actions.addWidget(self.repair_workspace_button)
+        repair_actions.addWidget(self.cancel_repair_workspace_button)
+        repair_layout.addLayout(repair_actions)
+        self.repair_workspace_result = QTextEdit()
+        self.repair_workspace_result.setReadOnly(True)
+        self.repair_workspace_result.setMaximumHeight(160)
+        repair_layout.addWidget(self.repair_workspace_result)
+        layout.addWidget(repair_group)
+
+        compare_group = QGroupBox("Deep Full SD Image Compare — OPTIONAL / SLOW")
         compare_layout = QVBoxLayout(compare_group)
         self.compare_selection = QLabel("No images selected. Choose at least two equal-sized full acquisitions.")
         self.compare_selection.setWordWrap(True)
@@ -1144,6 +1348,326 @@ class RecoveryTab(QWidget):
         if self.worker is not None:
             self.worker.deleteLater()
             self.worker = None
+
+    def select_fast_compare_images(self):
+        paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Select golden SanDisk image and original image",
+            "",
+            "Disk Images (*.img *.bin);;All Files (*)",
+        )
+        if paths:
+            if len(paths) != 2:
+                QMessageBox.warning(self, "Exactly two images", "Select exactly two images: golden SanDisk + original_read1.")
+                return
+            self.fast_compare_images = list(paths)
+            self.fast_compare_selection.setText(
+                f"Golden/reference: {Path(paths[0]).name}    |    Original: {Path(paths[1]).name}"
+            )
+            if not self.fast_compare_report.text().strip():
+                default = str(Path(paths[0]).resolve().parent / "gamestick_fast_structure_compare.json")
+                self.fast_compare_report.setText(default)
+
+    def select_fast_compare_report(self):
+        suggested = self.fast_compare_report.text().strip() or "gamestick_fast_structure_compare.json"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save fast image comparison report", suggested, "JSON Reports (*.json)"
+        )
+        if path:
+            if not path.lower().endswith(".json"):
+                path += ".json"
+            self.fast_compare_report.setText(path)
+
+    def run_fast_compare_images(self):
+        if len(self.fast_compare_images) != 2:
+            QMessageBox.warning(self, "Images required", "Select exactly two image files first.")
+            return
+        report = self.fast_compare_report.text().strip()
+        if not report:
+            QMessageBox.warning(self, "Report required", "Choose a host-side JSON report destination first.")
+            return
+        if Path(report).exists():
+            answer = QMessageBox.question(
+                self,
+                "Existing fast comparison report",
+                "Replace the existing host-side JSON report?\n\nNeither input image will be modified.",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                return
+        self.fast_compare_result.setPlainText(
+            "FAST comparison started. Reading FAT32 directory metadata and launcher/control files only.\n"
+            "No complete-image payload scan will be performed."
+        )
+        self.fast_compare_button.setEnabled(False)
+        self.cancel_fast_compare_button.setEnabled(True)
+        self.fast_compare_worker = FastImageCompareThread(
+            self.fast_compare_images[0], self.fast_compare_images[1], report
+        )
+        self.fast_compare_worker.progress.connect(self._fast_compare_progress)
+        self.fast_compare_worker.succeeded.connect(self._fast_compare_success)
+        self.fast_compare_worker.failed.connect(self._fast_compare_failure)
+        self.fast_compare_worker.finished.connect(self._fast_compare_finished)
+        self.fast_compare_worker.start()
+
+    def cancel_fast_compare_images(self):
+        if self.fast_compare_worker is not None and self.fast_compare_worker.isRunning():
+            self.fast_compare_worker.requestInterruption()
+            self.cancel_fast_compare_button.setEnabled(False)
+            self.fast_compare_result.append("Cancellation requested; no incomplete report will be written.")
+
+    def _fast_compare_progress(self, message: str):
+        self.fast_compare_result.setPlainText(message)
+
+    def _fast_compare_success(self, result):
+        a = result.image_a
+        b = result.image_b
+        self.fast_compare_result.setPlainText(
+            "FAST IMAGE LAB COMPLETE\n"
+            f"Status: {result.status}\n"
+            f"Logical structure identical: {result.structure_identical}\n"
+            f"Launcher/control files identical: {result.critical_files_identical}\n"
+            f"Only in golden/reference: {result.only_in_a_count}\n"
+            f"Only in original: {result.only_in_b_count}\n"
+            f"Size/type changes: {result.size_changed_count}\n"
+            f"Launcher/control changes: {result.critical_hash_changed_count}\n"
+            f"Files indexed: {a.file_count:,} vs {b.file_count:,}\n"
+            f"Control bytes hashed: {_fmt_bytes(a.bytes_hashed_for_controls + b.bytes_hashed_for_controls)}\n"
+            f"Report: {result.report_path}"
+        )
+        QMessageBox.information(
+            self,
+            "Fast image comparison complete",
+            f"{result.status}\n\n"
+            f"Launcher/control differences: {result.critical_hash_changed_count}\n"
+            f"Filesystem-only additions/removals: {result.only_in_a_count + result.only_in_b_count}\n\n"
+            "No full-image scan was performed and neither source image was modified."
+        )
+
+    def _fast_compare_failure(self, message: str):
+        self.fast_compare_result.setPlainText("FAST IMAGE LAB FAILED\n\n" + message)
+        QMessageBox.warning(self, "Fast image comparison stopped", message)
+
+    def _fast_compare_finished(self):
+        self.fast_compare_button.setEnabled(True)
+        self.cancel_fast_compare_button.setEnabled(False)
+        if self.fast_compare_worker is not None:
+            self.fast_compare_worker.deleteLater()
+            self.fast_compare_worker = None
+
+    def select_catalogue_compare_images(self):
+        paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Select golden/reference image and original image",
+            "",
+            "Disk Images (*.img *.bin);;All Files (*)",
+        )
+        if paths:
+            if len(paths) != 2:
+                QMessageBox.warning(self, "Exactly two images", "Select exactly two images: golden/reference + original_read1.")
+                return
+            self.catalogue_compare_images = list(paths)
+            self.catalogue_compare_selection.setText(
+                f"Golden/reference: {Path(paths[0]).name}    |    Original: {Path(paths[1]).name}"
+            )
+            if not self.catalogue_compare_report.text().strip():
+                default = str(Path(paths[0]).resolve().parent / "gamestick_catalogue_compare.json")
+                self.catalogue_compare_report.setText(default)
+
+    def select_catalogue_compare_report(self):
+        suggested = self.catalogue_compare_report.text().strip() or "gamestick_catalogue_compare.json"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save surgical catalogue comparison report", suggested, "JSON Reports (*.json)"
+        )
+        if path:
+            if not path.lower().endswith(".json"):
+                path += ".json"
+            self.catalogue_compare_report.setText(path)
+
+    def run_catalogue_compare_images(self):
+        if len(self.catalogue_compare_images) != 2:
+            QMessageBox.warning(self, "Images required", "Select exactly two image files first.")
+            return
+        report = self.catalogue_compare_report.text().strip()
+        if not report:
+            QMessageBox.warning(self, "Report required", "Choose a host-side JSON report destination first.")
+            return
+        if Path(report).exists():
+            answer = QMessageBox.question(
+                self,
+                "Existing catalogue report",
+                "Replace the existing host-side JSON report?\n\nNeither input image will be modified.",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                return
+        self.catalogue_compare_result.setPlainText(
+            "Starting surgical catalogue comparison...\n"
+            "Only WQW central directories + filelist.txt/fileinfo.txt are read."
+        )
+        self.catalogue_compare_button.setEnabled(False)
+        self.cancel_catalogue_compare_button.setEnabled(True)
+        self.catalogue_compare_worker = CatalogueCompareThread(
+            self.catalogue_compare_images[0], self.catalogue_compare_images[1], report
+        )
+        self.catalogue_compare_worker.progress.connect(self._catalogue_compare_progress)
+        self.catalogue_compare_worker.succeeded.connect(self._catalogue_compare_success)
+        self.catalogue_compare_worker.failed.connect(self._catalogue_compare_failure)
+        self.catalogue_compare_worker.finished.connect(self._catalogue_compare_finished)
+        self.catalogue_compare_worker.start()
+
+    def cancel_catalogue_compare_images(self):
+        if self.catalogue_compare_worker is not None and self.catalogue_compare_worker.isRunning():
+            self.catalogue_compare_worker.requestInterruption()
+            self.cancel_catalogue_compare_button.setEnabled(False)
+            self.catalogue_compare_result.append("Cancellation requested; no incomplete report will be written.")
+
+    def _catalogue_compare_progress(self, message: str):
+        self.catalogue_compare_result.setPlainText(message)
+
+    def _catalogue_compare_success(self, result):
+        total_read = (
+            result.image_a.bytes_read_for_fat + result.image_a.bytes_read_for_controls
+            + result.image_b.bytes_read_for_fat + result.image_b.bytes_read_for_controls
+        )
+        self.catalogue_compare_result.setPlainText(
+            "SURGICAL CATALOGUE LAB COMPLETE\n"
+            f"Status: {result.status}\n"
+            f"Identical catalogues: {result.identical_catalogue_count}/15\n"
+            f"Catalogue-list differences: {result.differing_catalogue_count}\n"
+            f"Byte-only control differences: {result.byte_only_catalogue_count}\n"
+            f"Damaged/unreadable: {result.damaged_or_unreadable_count}\n"
+            f"List-different codes: {', '.join(result.differing_catalogue_codes) or 'none'}\n"
+            f"Byte-only codes: {', '.join(result.byte_only_catalogue_codes) or 'none'}\n"
+            f"Damaged codes: {', '.join(result.damaged_or_unreadable_codes) or 'none'}\n"
+            f"ROOT fileinfo: {result.root_fileinfo_status}\n"
+            f"Approx bytes read (both images): {_fmt_bytes(total_read)}\n"
+            f"Report: {result.report_path}"
+        )
+        QMessageBox.information(
+            self,
+            "Surgical catalogue comparison complete",
+            f"{result.status}\n\n"
+            f"Different catalogues: {', '.join(result.differing_catalogue_codes) or 'none'}\n"
+            f"Damaged/unreadable: {', '.join(result.damaged_or_unreadable_codes) or 'none'}\n\n"
+            "No ROM payloads were scanned and neither source image was modified."
+        )
+
+    def _catalogue_compare_failure(self, message: str):
+        self.catalogue_compare_result.setPlainText("SURGICAL CATALOGUE LAB FAILED\n\n" + message)
+        QMessageBox.warning(self, "Catalogue comparison stopped", message)
+
+    def _catalogue_compare_finished(self):
+        self.catalogue_compare_button.setEnabled(True)
+        self.cancel_catalogue_compare_button.setEnabled(False)
+        if self.catalogue_compare_worker is not None:
+            self.catalogue_compare_worker.deleteLater()
+            self.catalogue_compare_worker = None
+
+    def select_repair_workspace_images(self):
+        paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Select golden/reference image and repair-base image",
+            "",
+            "Disk Images (*.img *.bin);;All Files (*)",
+        )
+        if paths:
+            if len(paths) != 2:
+                QMessageBox.warning(self, "Exactly two images", "Select exactly two images: golden/reference first, repair base second.")
+                return
+            self.repair_workspace_images = list(paths)
+            self.repair_workspace_selection.setText(
+                f"Golden/reference: {Path(paths[0]).name}    |    Repair base: {Path(paths[1]).name}"
+            )
+            if not self.repair_workspace_output.text().strip():
+                default = str(Path(paths[0]).resolve().parent / "gamestick_repair.gsworkspace")
+                self.repair_workspace_output.setText(default)
+
+    def select_repair_workspace_output(self):
+        suggested = self.repair_workspace_output.text().strip() or "gamestick_repair.gsworkspace"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save repair workspace", suggested, "GameStick Workspace (*.gsworkspace)"
+        )
+        if path:
+            if not path.lower().endswith(".gsworkspace"):
+                path += ".gsworkspace"
+            self.repair_workspace_output.setText(path)
+
+    def run_repair_workspace(self):
+        if len(self.repair_workspace_images) != 2:
+            QMessageBox.warning(self, "Images required", "Select golden/reference and repair-base images first.")
+            return
+        output = self.repair_workspace_output.text().strip()
+        if not output:
+            QMessageBox.warning(self, "Workspace required", "Choose a host-side .gsworkspace output first.")
+            return
+        overwrite = False
+        if Path(output).exists():
+            answer = QMessageBox.question(
+                self,
+                "Existing repair workspace",
+                "Replace the existing host-side repair workspace?\n\nNeither source image will be modified.",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                return
+            overwrite = True
+        self.repair_workspace_result.setPlainText(
+            "Building fast host-side repair workspace...\n"
+            "Source images remain read-only; only damaged same-size catalogue candidates will be copied."
+        )
+        self.repair_workspace_button.setEnabled(False)
+        self.cancel_repair_workspace_button.setEnabled(True)
+        self.repair_workspace_worker = RepairWorkspaceThread(
+            self.repair_workspace_images[0], self.repair_workspace_images[1], output, overwrite=overwrite
+        )
+        self.repair_workspace_worker.progress.connect(self._repair_workspace_progress)
+        self.repair_workspace_worker.succeeded.connect(self._repair_workspace_success)
+        self.repair_workspace_worker.failed.connect(self._repair_workspace_failure)
+        self.repair_workspace_worker.finished.connect(self._repair_workspace_finished)
+        self.repair_workspace_worker.start()
+
+    def cancel_repair_workspace(self):
+        if self.repair_workspace_worker is not None and self.repair_workspace_worker.isRunning():
+            self.repair_workspace_worker.requestInterruption()
+            self.cancel_repair_workspace_button.setEnabled(False)
+            self.repair_workspace_result.append("Cancellation requested; no incomplete workspace will be promoted.")
+
+    def _repair_workspace_progress(self, message: str):
+        self.repair_workspace_result.setPlainText(message)
+
+    def _repair_workspace_success(self, result):
+        self.repair_workspace_result.setPlainText(
+            "REPAIR WORKSPACE CREATED\n"
+            f"Repair catalogues: {', '.join(result.repaired_codes) or 'none'}\n"
+            f"Workspace: {result.workspace_path}\n"
+            f"Workspace size: {_fmt_bytes(result.workspace_size_bytes)}\n"
+            f"Bytes read from the two images: {_fmt_bytes(result.bytes_read_from_images)}\n"
+            f"SHA-256: {result.workspace_sha256}\n"
+            f"Archive verified: {result.archive_verified}\n"
+            "Source images modified: NO"
+        )
+        QMessageBox.information(
+            self,
+            "Repair workspace created",
+            f"Repair codes: {', '.join(result.repaired_codes)}\n\n"
+            f"Created: {result.workspace_path}\n\n"
+            "Both source images remain untouched. No GameStick write was performed."
+        )
+
+    def _repair_workspace_failure(self, message: str):
+        self.repair_workspace_result.setPlainText("REPAIR WORKSPACE FAILED\n\n" + message)
+        QMessageBox.warning(self, "Repair workspace stopped", message)
+
+    def _repair_workspace_finished(self):
+        self.repair_workspace_button.setEnabled(True)
+        self.cancel_repair_workspace_button.setEnabled(False)
+        if self.repair_workspace_worker is not None:
+            self.repair_workspace_worker.deleteLater()
+            self.repair_workspace_worker = None
 
     def select_compare_images(self):
         paths, _ = QFileDialog.getOpenFileNames(

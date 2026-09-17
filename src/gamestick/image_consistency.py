@@ -346,7 +346,7 @@ def compare_full_images(
         payload = {
             "schema_version": 1,
             "report_type": "gamestick-full-image-consistency-map",
-            "tool_version": "0.5.0-alpha8.2",
+            "tool_version": "0.5.0-alpha10",
             "created_at_utc": created,
             "status": result.status,
             "safety": {

@@ -1,4 +1,55 @@
-# GameStick Inspector 0.5.0-alpha8.2
+# GameStick Inspector 0.5.0-alpha11
+
+
+> **alpha11 Fast Repair Workspace:** turn verified golden catalogue data into a small host-side repair overlay without copying or modifying either 60 GB image. The builder auto-selects only catalogues that are VERIFIED in the golden image and damaged/unreadable in the repair base, requires an identical DAT file size, and revalidates the replacement WQW/filelist before packaging it.
+
+## 0.5.0-alpha11 — Fast Repair Workspace
+
+- Adds **FAST Repair Workspace — Host-side overlay only** to Recovery & Images.
+- Automatically detects repair candidates from the existing surgical catalogue comparison semantics; no catalogue code is hard-coded.
+- A candidate qualifies only when the golden catalogue control is `VERIFIED`, the repair-base control is not verified, and the corresponding DAT files are exactly the same size.
+- Reads only the qualifying DAT payloads plus bounded FAT/catalogue metadata; it does not copy either complete raw image.
+- Creates a `.gsworkspace` ZIP container with `manifest.json` and exact replacement DAT payload(s).
+- Records the damaged base DAT SHA-256, replacement SHA-256, target FAT-chain fingerprint, cluster count, replacement `filelist.txt` SHA-256, and ROM-name count so a future apply step can fail closed against the wrong base.
+- Reopens and verifies the completed workspace archive before promotion.
+- Both source images are opened read-only; no source image, SD card, FAT, DAT, or GameStick media is modified.
+- CLI: `repair_workspace.bat <golden.img> <base.img> --output gamestick_repair.gsworkspace`.
+
+> **alpha10 Surgical Catalogue Lab:** compare two existing raw images without another full-card pass. The recommended comparator reads only the FAT32 allocation table, WQW central directories, `filelist.txt` from `000`–`014`, and `fileinfo.txt` from `ROOT.DAT`. ROM payloads and artwork are never scanned.
+
+## 0.5.0-alpha10 — Surgical Catalogue Lab
+
+- Adds **SURGICAL Catalogue Lab — RECOMMENDED NEXT** to Recovery & Images.
+- Directly locates `ROOT.DAT` and `000/000.DAT` through `014/014.DAT` inside raw FAT32 images.
+- Reads only WQW central-directory metadata plus canonical `filelist.txt` / `fileinfo.txt` controls.
+- Reports exact bounded ROM-name additions/removals from the catalogue lists.
+- Damaged/unreadable DAT controls are reported per catalogue without aborting the whole comparison.
+- Source images remain read-only; no ROM payload scan, image mutation, DAT regeneration, restore, or GameStick write authority is introduced.
+- CLI: `catalogue_compare.bat <golden.img> <original.img> --report gamestick_catalogue_compare.json`.
+
+
+## 0.5.0-alpha9 — Fast Image Lab
+
+- Adds **FAST Image Lab — Golden vs Original** to Recovery Images.
+- Reads MBR/FAT32 metadata directly from `.img`/`.bin` files without mounting or rescanning the physical SD card.
+- Enumerates logical paths/sizes and hashes only bounded launcher/control files (`root.dat`, `NNN/NNN.dat`, and small `cubegm` control/config files).
+- Produces a structural SHA-256 that deliberately ignores physical cluster placement, so logically equivalent FAT32 images compare equal even when allocation differs.
+- Classifies comparisons as `LOGICALLY_IDENTICAL`, `CONTENT_LAYOUT_DIFFERS_CONTROLS_MATCH`, or `LAUNCHER_OR_CONTROL_DIFFERENCE`.
+- Adds `fast_compare.bat` / `src/fast_compare_cli.py`.
+- Full-image byte/sector comparison remains available but is now labelled **optional / slow**.
+- No new GameStick write authority is introduced. Input images remain read-only.
+
+
+> **alpha8.3 late-revalidation resilience:** PowerShell storage mapping now has bounded timeout retry, and once an image has passed destination reread verification a later mapping/commit failure preserves the verified staged image instead of deleting hours of acquisition work.
+
+## 0.5.0-alpha8.3 — late source-revalidation resilience
+
+- Windows Storage/PowerShell mapping now allows up to **30 seconds per attempt with two bounded attempts** instead of one brittle 12-second timeout.
+- A timeout is still not treated as identity success; source identity remains fail-closed.
+- If a source-identity revalidation fails **after the staged image has already passed its complete destination reread SHA-256 verification**, Inspector preserves that verified staging file on the already-proven safe output volume instead of deleting hours of acquisition work.
+- Preserved staging is deliberately not promoted to the requested canonical `.img`; the failure text reports its exact path.
+- Destination-volume identity failures, promotion failures, pre-verification failures, and explicit cancellation retain strict cleanup/rollback behaviour.
+- **226 automated tests passed; 1 Qt smoke test skipped in this packaging environment because PyQt5 is unavailable.**
 
 > **alpha8.2 fresh-extract launcher fix:** a newly extracted release no longer assumes `.venv` already exists. The Windows launchers bootstrap the local environment through `setup.bat` when required and fail with explicit diagnostics instead of `The system cannot find the path specified.`
 
@@ -13,7 +64,7 @@
 
 > **alpha8.1 large-device progress fix:** Qt progress signals now carry Python integer objects instead of 32-bit signed integers, preventing byte counters from wrapping negative above 2 GiB/4 GiB-scale boundaries. Imaging/comparison data paths were already using Python integers; this fixes the GUI telemetry only. Pass and overall progress are now shown separately.
 
-## 0.5.0-alpha8.2 — large-device progress telemetry hardening
+## 0.5.0-alpha8.1 — large-device progress telemetry hardening
 
 - Fixes a real Windows GUI defect observed on a ~59.35 GB GameStick image: `pyqtSignal(..., int, int)` truncated/wrapped large byte counts into signed 32-bit values, producing negative counters and apparent progress resets.
 - Raw-image and full-image-comparison worker progress signals now use Qt `object` payloads so Python's arbitrary-precision integers survive thread delivery unchanged.

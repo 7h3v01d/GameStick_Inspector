@@ -35,6 +35,23 @@ class ImagingCancelled(ImagingError):
     """Raised when the caller requests cancellation during imaging."""
 
 
+class VerifiedStagePreserved(ImagingError):
+    """A late safety/commit failure occurred after transfer verification.
+
+    The verified staged image is deliberately retained on the already-bound safe
+    output volume so a transient metadata failure cannot destroy hours of evidence.
+    It is *not* promoted to the canonical destination until all safety gates pass.
+    """
+
+
+class SourceIdentityUnavailable(ImagingError):
+    """Fresh physical-source mapping could not be obtained."""
+
+
+class SourceIdentityChanged(ImagingError):
+    """Fresh physical-source mapping disagrees with the probed source."""
+
+
 def sha256_file(
     path: str | Path,
     *,
@@ -383,7 +400,7 @@ def revalidate_source_identity(
     resolver = mapping_resolver or _default_mapping_resolver
     current = resolver(plan.selected_root)
     if current.mapping_error:
-        raise ImagingError(f"Source identity revalidation failed: {current.mapping_error}")
+        raise SourceIdentityUnavailable(f"Source identity revalidation failed: {current.mapping_error}")
 
     mismatches: list[str] = []
 
@@ -447,7 +464,7 @@ def revalidate_source_identity(
 
     if mismatches:
         detail = "; ".join(mismatches)
-        raise ImagingError(
+        raise SourceIdentityChanged(
             "Physical source identity changed after the probe/preflight. Raw acquisition refused; "
             f"reinsert/select the intended GameStick and probe again. {detail}"
         )
@@ -956,6 +973,7 @@ def create_raw_image(
     started = datetime.now(timezone.utc).isoformat()
     digest = hashlib.sha256()
     written = 0
+    transfer_verified = False
 
     try:
         if source_opener is None:
@@ -1007,6 +1025,7 @@ def create_raw_image(
             raise ImagingError(
                 "Staged destination reread verification failed. Existing recovery artifacts were not replaced."
             )
+        transfer_verified = True
 
         source_consistency_status = "NOT_REQUESTED"
         second_source_sha256 = None
@@ -1132,15 +1151,34 @@ def create_raw_image(
             rollback_manifest=rollback_manifest,
         )
         return result
-    except Exception:
+    except Exception as exc:
         for fd in (image_stage_fd, manifest_stage_fd):
             if fd is not None:
                 try:
                     os.close(fd)
                 except OSError:
                     pass
-        # No uncommitted staging file should masquerade as a completed recovery pair.
-        # Existing canonical image/manifest artifacts are preserved by the transaction.
+
+        if transfer_verified and isinstance(exc, (SourceIdentityUnavailable, SourceIdentityChanged)):
+            # Once destination reread verification has succeeded, a later *source*
+            # identity mapping failure must not destroy hours of verified evidence.
+            # Destination-authority/promotion failures retain their existing strict
+            # cleanup behavior; only source revalidation failures preserve staging.
+            preserved = []
+            if partial is not None and partial.exists():
+                preserved.append(f"verified staged image: {partial}")
+            if staged_manifest is not None and staged_manifest.exists():
+                preserved.append(f"staged manifest: {staged_manifest}")
+            if preserved:
+                detail = "; ".join(preserved)
+                raise VerifiedStagePreserved(
+                    f"{exc}\n\nTRANSFER-VERIFIED STAGING WAS PRESERVED rather than deleted because the failure "
+                    f"occurred after destination reread verification. The canonical image was NOT promoted. "
+                    f"Preserved artifact(s): {detail}"
+                ) from exc
+
+        # Before transfer verification (or on explicit cancellation), incomplete
+        # staging must not masquerade as a completed recovery artifact.
         for staged in (partial, staged_manifest):
             if staged is not None and staged.exists():
                 try:

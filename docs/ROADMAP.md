@@ -1,3 +1,11 @@
+# Pace note — alpha10
+
+No further multi-hour full-card acquisitions are required for the current customisation investigation. Prefer surgical catalogue/control reads from the two preserved images. Deep full-image comparison remains optional.
+
+# Pace note — alpha9
+
+The current project path prioritises image-local structural analysis and customisation research. Repeated full-device acquisitions are no longer required by default. Deep whole-image comparison remains optional evidence work.
+
 # Roadmap
 
 ## Phase 1 — Evidence & Safety

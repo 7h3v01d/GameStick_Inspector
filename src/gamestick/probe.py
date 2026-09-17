@@ -13,6 +13,7 @@ import sqlite3
 import stat
 import string
 import subprocess
+import time
 import xml.etree.ElementTree as ET
 from collections import Counter
 from dataclasses import replace
@@ -990,7 +991,24 @@ def _windows_powershell_candidates(
     return candidates
 
 
-def _run_windows_mapping_script(ps: str) -> tuple[Dict[str, Any], str]:
+def _run_windows_mapping_script(
+    ps: str,
+    *,
+    timeout_seconds: int = 30,
+    timeout_attempts: int = 2,
+    retry_delay_seconds: float = 1.0,
+) -> tuple[Dict[str, Any], str]:
+    """Run the trusted Windows mapping query with bounded transient-timeout retry.
+
+    Storage cmdlets can be temporarily slow immediately after sustained raw I/O. A
+    single short timeout must not turn a healthy acquisition into a false identity
+    failure. The retry remains bounded and all non-timeout failures still fail closed.
+    """
+    if timeout_seconds <= 0:
+        raise ValueError("timeout_seconds must be positive")
+    if timeout_attempts <= 0:
+        raise ValueError("timeout_attempts must be positive")
+
     candidates = _windows_powershell_candidates()
     if not candidates:
         system_root = _trusted_windows_directory() or "<unresolved Windows directory>"
@@ -1002,31 +1020,44 @@ def _run_windows_mapping_script(ps: str) -> tuple[Dict[str, Any], str]:
 
     failures: List[str] = []
     for executable in candidates:
-        try:
-            completed = subprocess.run(
-                [executable, "-NoProfile", "-NonInteractive", "-Command", ps],
-                capture_output=True,
-                text=True,
-                timeout=12,
-                check=True,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
-            payload_text = completed.stdout.strip()
-            if not payload_text:
-                raise ValueError("PowerShell returned no mapping JSON")
-            data = json.loads(payload_text)
-            if not isinstance(data, dict):
-                raise ValueError("PowerShell returned an unexpected mapping payload")
-            return data, executable
-        except FileNotFoundError as exc:
-            failures.append(f"{executable}: not found ({exc})")
-        except subprocess.CalledProcessError as exc:
-            stderr = (exc.stderr or "").strip().replace("\r", " ").replace("\n", " ")
-            stdout = (exc.stdout or "").strip().replace("\r", " ").replace("\n", " ")
-            detail = stderr or stdout or f"exit code {exc.returncode}"
-            failures.append(f"{executable}: {detail[:500]}")
-        except Exception as exc:
-            failures.append(f"{executable}: {type(exc).__name__}: {exc}")
+        for attempt in range(1, timeout_attempts + 1):
+            try:
+                completed = subprocess.run(
+                    [executable, "-NoProfile", "-NonInteractive", "-Command", ps],
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout_seconds,
+                    check=True,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+                payload_text = completed.stdout.strip()
+                if not payload_text:
+                    raise ValueError("PowerShell returned no mapping JSON")
+                data = json.loads(payload_text)
+                if not isinstance(data, dict):
+                    raise ValueError("PowerShell returned an unexpected mapping payload")
+                return data, executable
+            except subprocess.TimeoutExpired as exc:
+                if attempt < timeout_attempts:
+                    if retry_delay_seconds > 0:
+                        time.sleep(retry_delay_seconds)
+                    continue
+                failures.append(
+                    f"{executable}: TimeoutExpired after {timeout_seconds}s "
+                    f"({timeout_attempts} attempts): {exc}"
+                )
+            except FileNotFoundError as exc:
+                failures.append(f"{executable}: not found ({exc})")
+                break
+            except subprocess.CalledProcessError as exc:
+                stderr = (exc.stderr or "").strip().replace("\r", " ").replace("\n", " ")
+                stdout = (exc.stdout or "").strip().replace("\r", " ").replace("\n", " ")
+                detail = stderr or stdout or f"exit code {exc.returncode}"
+                failures.append(f"{executable}: {detail[:500]}")
+                break
+            except Exception as exc:
+                failures.append(f"{executable}: {type(exc).__name__}: {exc}")
+                break
 
     raise RuntimeError("All PowerShell mapping backends failed: " + " | ".join(failures))
 

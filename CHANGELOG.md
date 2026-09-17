@@ -1,4 +1,41 @@
+## 0.5.0-alpha11 — fast host-side repair workspace
+
+- Added a small `.gsworkspace` repair-overlay format instead of materializing another 60 GB raw image.
+- Repair candidates are selected automatically: golden control must be VERIFIED, repair-base control damaged/unreadable, and DAT file sizes identical.
+- Workspace payloads are validated as WQW catalogues and their canonical `filelist.txt` controls are CRC/decompression checked before packaging.
+- Manifest binds each replacement to the damaged base DAT hash and FAT-chain fingerprint for future fail-closed application.
+- Completed workspace archives are reopened and payload-hash verified before atomic promotion.
+- Added GUI and `repair_workspace.bat`; source images remain read-only and no GameStick write path is enabled.
+
+## 0.5.0-alpha10 — Surgical Catalogue Lab / short-loop pivot
+
+- Adds raw-image catalogue comparison that reads only FAT metadata, WQW central directories, `filelist.txt`, and `fileinfo.txt`.
+- No ROM payloads or artwork are scanned; no additional SD-card acquisition is required.
+- Per-catalogue results distinguish identical controls, list differences, byte-only control differences, and damaged/unreadable controls.
+- Bounded catalogue ROM-name differences are exported to the host-side JSON report for actionable customisation analysis.
+- Adds GUI and `catalogue_compare.bat` / `catalogue_compare_cli.py` entry points.
+- Keeps all source images read-only and adds no image/SD write authority.
+
+## 0.5.0-alpha9 — Fast Image Lab / pace-first pivot
+
+- Stops requiring repeated full-card acquisitions for the current customisation investigation.
+- Adds a read-only FAT32 raw-image inspector that reads filesystem metadata and bounded launcher/control files instead of scanning all ~60 GB.
+- Adds fast two-image logical comparison with launcher/control hash comparison and bounded JSON differences.
+- Adds GUI and CLI entry points (`fast_compare.bat`).
+- Full byte/sector comparison remains available as an optional deep diagnostic rather than the default next step.
+- Preserves the existing no-restore/no-ROM-write/no-firmware-write safety boundary.
+
 # Changelog
+
+## 0.5.0-alpha8.3 — late source-revalidation resilience / verified-stage preservation
+
+- Replaced the brittle single 12-second PowerShell storage-mapping timeout with a bounded 30-second, two-attempt timeout policy for transiently slow Windows Storage cmdlets after sustained raw I/O.
+- A mapping timeout remains fail-closed: it is not treated as proof that source identity matched.
+- Once the staged image has passed its complete destination reread SHA-256 verification, a later source-identity revalidation failure now preserves that transfer-verified staged image on the already-bound safe output volume instead of deleting it. Destination-authority and promotion failures retain their previous strict cleanup/rollback semantics.
+- Preserved staging is explicitly *not* promoted to the canonical destination; the error reports the exact preserved staging path so evidence can be recovered/inspected.
+- Incomplete pre-verification staging and user-cancelled staging are still cleaned up.
+- Retains alpha8.1 large-device telemetry and alpha8.2 fresh-extract launcher hardening. No GameStick write authority added.
+- **226 automated tests passed; 1 Qt smoke test skipped in this packaging environment because PyQt5 is unavailable.**
 
 ## 0.5.0-alpha8.2 — fresh-extract Windows launcher hardening
 
@@ -9,7 +46,7 @@
 - Added release regression coverage for the fresh-extract launcher contract.
 - Retains alpha8.1's 64-bit-safe Qt progress telemetry fix. No GameStick write authority added.
 - **221 automated tests passed; 1 Qt smoke test skipped in this packaging environment because PyQt5 is unavailable.**
-## 0.5.0-alpha8.2 — large-device progress telemetry hardening
+## 0.5.0-alpha8.1 — large-device progress telemetry hardening
 
 - Fixed 32-bit Qt signal overflow in raw-imaging and image-comparison progress reporting. Large byte counts could wrap negative and make the GUI appear to restart even though the underlying Python imaging loop continued correctly.
 - Progress signals now transport Python integer objects end-to-end.
