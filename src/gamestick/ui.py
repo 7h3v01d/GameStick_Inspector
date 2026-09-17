@@ -19,6 +19,7 @@ from PyQt5.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QScrollArea,
     QTabWidget,
     QTextEdit,
     QTreeWidget,
@@ -34,11 +35,13 @@ from .image_consistency import compare_full_images
 from .fast_image_lab import compare_fast_structures
 from .catalogue_image_lab import compare_catalogue_controls
 from .repair_workspace import build_repair_workspace
+from .rom_customization import build_hide_rom_workspace
+from .custom_apply import apply_customization_workspace, expected_confirmation, rollback_customization
 from .probe import find_candidate_volumes, inspect_volume
 from .reporting import write_evidence_bundle, write_probe_report
 from .windows_privilege import is_process_elevated, relaunch_current_app_elevated
 
-VERSION = "0.5.0-alpha11"
+VERSION = "0.5.0-alpha13.1"
 _BROWSER_PER_DIRECTORY_LIMIT = 1000
 _BROWSER_TOTAL_NODE_LIMIT = 5000
 
@@ -71,8 +74,9 @@ class InspectorTab(QWidget):
         layout = QVBoxLayout(self)
 
         safety = QLabel(
-            "SAFETY-FIRST BUILD — GameStick filesystem writes, raw-device writes, restore, format, firmware flash, "
-            "ROM add/remove, DAT regeneration/extraction, and launcher-database modification remain disabled. Verified raw-device READ imaging is available."
+            "SAFETY-FIRST BUILD — raw restore, format, firmware flash and ROM-payload add/remove remain disabled. "
+            "Host-side overlays remain non-destructive; the Customise page can apply only pre-attested launcher-control "
+            "byte ranges to an explicitly confirmed TEST/CLONE card, with rollback-before-write and reread verification."
         )
         safety.setWordWrap(True)
         safety.setStyleSheet("font-weight: bold; padding: 8px; border: 1px solid #888;")
@@ -849,6 +853,88 @@ class RepairWorkspaceThread(QThread):
             self.failed.emit(str(exc))
 
 
+class RomHideWorkspaceThread(QThread):
+    progress = pyqtSignal(str)
+    succeeded = pyqtSignal(object)
+    failed = pyqtSignal(str)
+
+    def __init__(self, source_image, rom_query, output_path, *, overwrite=False):
+        super().__init__()
+        self.source_image = source_image
+        self.rom_query = rom_query
+        self.output_path = output_path
+        self.overwrite = overwrite
+
+    def run(self):
+        try:
+            result = build_hide_rom_workspace(
+                self.source_image,
+                self.rom_query,
+                self.output_path,
+                overwrite=self.overwrite,
+                progress=self.progress.emit,
+                cancelled=self.isInterruptionRequested,
+            )
+            self.succeeded.emit(result)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+class CustomApplyThread(QThread):
+    progress = pyqtSignal(str)
+    succeeded = pyqtSignal(object)
+    failed = pyqtSignal(str)
+
+    def __init__(self, source_image, workspace, target_root, rollback_path, *, confirmation, overwrite_rollback=False):
+        super().__init__()
+        self.source_image = source_image
+        self.workspace = workspace
+        self.target_root = target_root
+        self.rollback_path = rollback_path
+        self.confirmation = confirmation
+        self.overwrite_rollback = overwrite_rollback
+
+    def run(self):
+        try:
+            result = apply_customization_workspace(
+                self.source_image,
+                self.workspace,
+                self.target_root,
+                self.rollback_path,
+                confirmation=self.confirmation,
+                overwrite_rollback=self.overwrite_rollback,
+                progress=self.progress.emit,
+                cancelled=self.isInterruptionRequested,
+            )
+            self.succeeded.emit(result)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+class CustomRollbackThread(QThread):
+    progress = pyqtSignal(str)
+    succeeded = pyqtSignal(object)
+    failed = pyqtSignal(str)
+
+    def __init__(self, rollback_path, target_root, *, confirmation):
+        super().__init__()
+        self.rollback_path = rollback_path
+        self.target_root = target_root
+        self.confirmation = confirmation
+
+    def run(self):
+        try:
+            result = rollback_customization(
+                self.rollback_path,
+                self.target_root,
+                confirmation=self.confirmation,
+                progress=self.progress.emit,
+            )
+            self.succeeded.emit(result)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
 class ImageCompareThread(QThread):
     progress = pyqtSignal(object, object)
     succeeded = pyqtSignal(object)
@@ -883,12 +969,49 @@ class RecoveryTab(QWidget):
         self.catalogue_compare_images = []
         self.repair_workspace_worker = None
         self.repair_workspace_images = []
+        self.rom_hide_worker = None
+        self.rom_hide_image = None
+        self.custom_apply_worker = None
+        self.custom_rollback_worker = None
         self.compare_worker = None
         self.compare_images = []
         layout = QVBoxLayout(self)
+
+        # Recovery used to be one very tall QVBox containing every workflow.
+        # As features accumulated Qt compressed each group until the controls were
+        # technically visible but practically unreadable. Keep the global safety
+        # banner/status fixed, then give each workflow its own page.
+        self.workflow_tabs = QTabWidget()
+        self.workflow_tabs.setDocumentMode(True)
+
+        def make_workflow_page():
+            page = QWidget()
+            page_layout = QVBoxLayout(page)
+            page_layout.setContentsMargins(0, 0, 0, 0)
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            content = QWidget()
+            content_layout = QVBoxLayout(content)
+            scroll.setWidget(content)
+            page_layout.addWidget(scroll)
+            return page, content_layout
+
+        imaging_page, imaging_layout = make_workflow_page()
+        analysis_page, analysis_layout = make_workflow_page()
+        repair_page, repair_page_layout = make_workflow_page()
+        customise_page, customise_page_layout = make_workflow_page()
+        advanced_page, advanced_layout = make_workflow_page()
+
+        self.workflow_tabs.addTab(imaging_page, "Image & Verify")
+        self.workflow_tabs.addTab(analysis_page, "Fast Analysis")
+        self.workflow_tabs.addTab(repair_page, "Repair")
+        self.workflow_tabs.addTab(customise_page, "Customise")
+        self.workflow_tabs.addTab(advanced_page, "Advanced")
+
         warning = QLabel(
             "Raw READ imaging is now available after a successful device probe. The GameStick is opened read-only. "
-            "Raw restore, firmware flashing and all GameStick write operations remain locked."
+            "Raw restore, firmware flashing and ROM-payload writes remain locked. The Customise page contains one explicit "
+            "bounded launcher-control write path for a TEST/CLONE card, with host-side rollback and reread verification."
         )
         warning.setWordWrap(True)
         warning.setStyleSheet("font-weight: bold; padding: 6px; border: 1px solid #888;")
@@ -903,6 +1026,7 @@ class RecoveryTab(QWidget):
         elevation_row.addWidget(self.elevate_button)
         layout.addLayout(elevation_row)
         self._refresh_elevation_status()
+        layout.addWidget(self.workflow_tabs, 1)
 
         create_group = QGroupBox("Create Verified-Transfer Full SD Image — READ-ONLY SOURCE")
         create_layout = QVBoxLayout(create_group)
@@ -945,9 +1069,10 @@ class RecoveryTab(QWidget):
         create_layout.addWidget(self.raw_progress)
         self.raw_status = QTextEdit()
         self.raw_status.setReadOnly(True)
-        self.raw_status.setMaximumHeight(130)
+        self.raw_status.setMinimumHeight(120)
+        self.raw_status.setMaximumHeight(220)
         create_layout.addWidget(self.raw_status)
-        layout.addWidget(create_group)
+        imaging_layout.addWidget(create_group)
 
         verify_group = QGroupBox("Verify Existing SD Image")
         inner = QVBoxLayout(verify_group)
@@ -964,9 +1089,10 @@ class RecoveryTab(QWidget):
         inner.addWidget(verify)
         self.result = QTextEdit()
         self.result.setReadOnly(True)
-        self.result.setMaximumHeight(105)
+        self.result.setMinimumHeight(100)
+        self.result.setMaximumHeight(180)
         inner.addWidget(self.result)
-        layout.addWidget(verify_group)
+        imaging_layout.addWidget(verify_group)
 
         fast_group = QGroupBox("FAST Image Lab — Golden vs Original (metadata/control files only)")
         fast_layout = QVBoxLayout(fast_group)
@@ -1003,9 +1129,10 @@ class RecoveryTab(QWidget):
         fast_layout.addLayout(fast_actions)
         self.fast_compare_result = QTextEdit()
         self.fast_compare_result.setReadOnly(True)
-        self.fast_compare_result.setMaximumHeight(150)
+        self.fast_compare_result.setMinimumHeight(110)
+        self.fast_compare_result.setMaximumHeight(190)
         fast_layout.addWidget(self.fast_compare_result)
-        layout.addWidget(fast_group)
+        analysis_layout.addWidget(fast_group)
 
         catalogue_group = QGroupBox("SURGICAL Catalogue Lab — RECOMMENDED NEXT")
         catalogue_layout = QVBoxLayout(catalogue_group)
@@ -1042,9 +1169,10 @@ class RecoveryTab(QWidget):
         catalogue_layout.addLayout(catalogue_actions)
         self.catalogue_compare_result = QTextEdit()
         self.catalogue_compare_result.setReadOnly(True)
-        self.catalogue_compare_result.setMaximumHeight(170)
+        self.catalogue_compare_result.setMinimumHeight(110)
+        self.catalogue_compare_result.setMaximumHeight(210)
         catalogue_layout.addWidget(self.catalogue_compare_result)
-        layout.addWidget(catalogue_group)
+        analysis_layout.addWidget(catalogue_group)
 
         repair_group = QGroupBox("FAST Repair Workspace — Host-side overlay only")
         repair_layout = QVBoxLayout(repair_group)
@@ -1082,9 +1210,129 @@ class RecoveryTab(QWidget):
         repair_layout.addLayout(repair_actions)
         self.repair_workspace_result = QTextEdit()
         self.repair_workspace_result.setReadOnly(True)
-        self.repair_workspace_result.setMaximumHeight(160)
+        self.repair_workspace_result.setMinimumHeight(140)
+        self.repair_workspace_result.setMaximumHeight(260)
         repair_layout.addWidget(self.repair_workspace_result)
-        layout.addWidget(repair_group)
+        repair_page_layout.addWidget(repair_group)
+
+        custom_group = QGroupBox("ROM Customisation Lab — FAST host-side launcher hide")
+        custom_layout = QVBoxLayout(custom_group)
+        custom_note = QLabel(
+            "First real customisation path. Select the healthy reference image, enter an existing ROM filename/title, "
+            "and create a tiny .gscustom overlay that removes the ROM from both numbered filelist.txt and ROOT.DAT "
+            "fileinfo.txt. The physical ROM payload and 60 GB source image remain untouched."
+        )
+        custom_note.setWordWrap(True)
+        custom_layout.addWidget(custom_note)
+
+        custom_image_row = QHBoxLayout()
+        self.rom_hide_image_path = QLineEdit()
+        self.rom_hide_image_path.setReadOnly(True)
+        custom_image_button = QPushButton("Select healthy reference .img...")
+        custom_image_button.clicked.connect(self.select_rom_hide_image)
+        custom_image_row.addWidget(self.rom_hide_image_path, 1)
+        custom_image_row.addWidget(custom_image_button)
+        custom_layout.addLayout(custom_image_row)
+
+        query_row = QHBoxLayout()
+        query_row.addWidget(QLabel("ROM filename/title:"))
+        self.rom_hide_query = QLineEdit()
+        self.rom_hide_query.setPlaceholderText("e.g. Solitaire.zip  (or 003:Solitaire.zip if ambiguous)")
+        query_row.addWidget(self.rom_hide_query, 1)
+        custom_layout.addLayout(query_row)
+
+        custom_output_row = QHBoxLayout()
+        self.rom_hide_output = QLineEdit()
+        self.rom_hide_output.setReadOnly(True)
+        custom_output_button = QPushButton("Choose .gscustom output...")
+        custom_output_button.clicked.connect(self.select_rom_hide_output)
+        custom_output_row.addWidget(self.rom_hide_output, 1)
+        custom_output_row.addWidget(custom_output_button)
+        custom_layout.addLayout(custom_output_row)
+
+        custom_actions = QHBoxLayout()
+        self.rom_hide_button = QPushButton("Build Hide-ROM Overlay")
+        self.rom_hide_button.clicked.connect(self.run_rom_hide_workspace)
+        self.cancel_rom_hide_button = QPushButton("Cancel")
+        self.cancel_rom_hide_button.setEnabled(False)
+        self.cancel_rom_hide_button.clicked.connect(self.cancel_rom_hide_workspace)
+        custom_actions.addWidget(self.rom_hide_button)
+        custom_actions.addWidget(self.cancel_rom_hide_button)
+        custom_layout.addLayout(custom_actions)
+        self.rom_hide_result = QTextEdit()
+        self.rom_hide_result.setReadOnly(True)
+        self.rom_hide_result.setMinimumHeight(140)
+        self.rom_hide_result.setMaximumHeight(260)
+        custom_layout.addWidget(self.rom_hide_result)
+        customise_page_layout.addWidget(custom_group)
+
+        apply_group = QGroupBox("Apply Overlay to TEST/CLONE Card — BOUNDED WRITE")
+        apply_layout = QVBoxLayout(apply_group)
+        apply_note = QLabel(
+            "Hardware test path. This does NOT rewrite 60 GB and does NOT delete a ROM payload. It revalidates the "
+            "healthy source image + .gscustom provenance, then overwrites only the pre-attested byte ranges inside the "
+            "existing ROOT.DAT and numbered DAT on a mounted TEST/CLONE GameStick card. A host-side .gsrollback is "
+            "committed before the first write and reread verification is mandatory."
+        )
+        apply_note.setWordWrap(True)
+        apply_layout.addWidget(apply_note)
+
+        apply_source_row = QHBoxLayout()
+        self.custom_apply_source = QLineEdit()
+        self.custom_apply_source.setReadOnly(True)
+        apply_source_button = QPushButton("Select healthy source .img...")
+        apply_source_button.clicked.connect(self.select_custom_apply_source)
+        apply_source_row.addWidget(self.custom_apply_source, 1)
+        apply_source_row.addWidget(apply_source_button)
+        apply_layout.addLayout(apply_source_row)
+
+        apply_workspace_row = QHBoxLayout()
+        self.custom_apply_workspace = QLineEdit()
+        self.custom_apply_workspace.setReadOnly(True)
+        apply_workspace_button = QPushButton("Select .gscustom...")
+        apply_workspace_button.clicked.connect(self.select_custom_apply_workspace)
+        apply_workspace_row.addWidget(self.custom_apply_workspace, 1)
+        apply_workspace_row.addWidget(apply_workspace_button)
+        apply_layout.addLayout(apply_workspace_row)
+
+        apply_target_row = QHBoxLayout()
+        self.custom_apply_target = QLineEdit()
+        self.custom_apply_target.setReadOnly(True)
+        apply_target_button = QPushButton("Select mounted TEST card root...")
+        apply_target_button.clicked.connect(self.select_custom_apply_target)
+        apply_target_row.addWidget(self.custom_apply_target, 1)
+        apply_target_row.addWidget(apply_target_button)
+        apply_layout.addLayout(apply_target_row)
+
+        apply_rollback_row = QHBoxLayout()
+        self.custom_apply_rollback = QLineEdit()
+        self.custom_apply_rollback.setReadOnly(True)
+        apply_rollback_button = QPushButton("Choose host .gsrollback...")
+        apply_rollback_button.clicked.connect(self.select_custom_apply_rollback)
+        apply_rollback_row.addWidget(self.custom_apply_rollback, 1)
+        apply_rollback_row.addWidget(apply_rollback_button)
+        apply_layout.addLayout(apply_rollback_row)
+
+        apply_actions = QHBoxLayout()
+        self.custom_apply_button = QPushButton("Preflight + Apply Tiny Overlay to TEST Card")
+        self.custom_apply_button.setStyleSheet("font-weight: bold;")
+        self.custom_apply_button.clicked.connect(self.run_custom_apply)
+        self.custom_rollback_button = QPushButton("Undo Using .gsrollback")
+        self.custom_rollback_button.clicked.connect(self.run_custom_rollback)
+        self.cancel_custom_apply_button = QPushButton("Cancel")
+        self.cancel_custom_apply_button.setEnabled(False)
+        self.cancel_custom_apply_button.clicked.connect(self.cancel_custom_apply)
+        apply_actions.addWidget(self.custom_apply_button)
+        apply_actions.addWidget(self.custom_rollback_button)
+        apply_actions.addWidget(self.cancel_custom_apply_button)
+        apply_layout.addLayout(apply_actions)
+
+        self.custom_apply_result = QTextEdit()
+        self.custom_apply_result.setReadOnly(True)
+        self.custom_apply_result.setMinimumHeight(170)
+        self.custom_apply_result.setMaximumHeight(320)
+        apply_layout.addWidget(self.custom_apply_result)
+        customise_page_layout.addWidget(apply_group)
 
         compare_group = QGroupBox("Deep Full SD Image Compare — OPTIONAL / SLOW")
         compare_layout = QVBoxLayout(compare_group)
@@ -1120,9 +1368,10 @@ class RecoveryTab(QWidget):
         compare_layout.addWidget(self.compare_progress)
         self.compare_result = QTextEdit()
         self.compare_result.setReadOnly(True)
-        self.compare_result.setMaximumHeight(150)
+        self.compare_result.setMinimumHeight(140)
+        self.compare_result.setMaximumHeight(260)
         compare_layout.addWidget(self.compare_result)
-        layout.addWidget(compare_group)
+        advanced_layout.addWidget(compare_group)
 
         locked = QGroupBox("Destructive Operations — LOCKED")
         locked_layout = QHBoxLayout(locked)
@@ -1130,8 +1379,12 @@ class RecoveryTab(QWidget):
             button = QPushButton(text)
             button.setEnabled(False)
             locked_layout.addWidget(button)
-        layout.addWidget(locked)
-        layout.addStretch(1)
+        advanced_layout.addWidget(locked)
+        imaging_layout.addStretch(1)
+        analysis_layout.addStretch(1)
+        repair_page_layout.addStretch(1)
+        customise_page_layout.addStretch(1)
+        advanced_layout.addStretch(1)
 
     def _refresh_elevation_status(self):
         elevated = is_process_elevated()
@@ -1669,6 +1922,273 @@ class RecoveryTab(QWidget):
             self.repair_workspace_worker.deleteLater()
             self.repair_workspace_worker = None
 
+    def select_rom_hide_image(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select healthy GameStick reference image",
+            "",
+            "Disk Images (*.img *.bin);;All Files (*)",
+        )
+        if path:
+            self.rom_hide_image = path
+            self.rom_hide_image_path.setText(path)
+            if not self.rom_hide_output.text().strip():
+                self.rom_hide_output.setText(str(Path(path).resolve().parent / "gamestick_custom_hide.gscustom"))
+
+    def select_rom_hide_output(self):
+        suggested = self.rom_hide_output.text().strip() or "gamestick_custom_hide.gscustom"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save customisation workspace", suggested, "GameStick Customisation (*.gscustom)"
+        )
+        if path:
+            if not path.lower().endswith(".gscustom"):
+                path += ".gscustom"
+            self.rom_hide_output.setText(path)
+
+    def run_rom_hide_workspace(self):
+        image = self.rom_hide_image_path.text().strip()
+        query = self.rom_hide_query.text().strip()
+        output = self.rom_hide_output.text().strip()
+        if not image:
+            QMessageBox.warning(self, "Image required", "Select the healthy/reference GameStick image first.")
+            return
+        if not query:
+            QMessageBox.warning(self, "ROM required", "Enter an existing ROM filename or distinctive title fragment.")
+            return
+        if not output:
+            QMessageBox.warning(self, "Workspace required", "Choose a .gscustom output first.")
+            return
+        overwrite = False
+        if Path(output).exists():
+            answer = QMessageBox.question(
+                self,
+                "Existing customisation workspace",
+                "Replace the existing host-side customisation workspace?\n\nThe source image will remain read-only.",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                return
+            overwrite = True
+        self.rom_hide_result.setPlainText(
+            "Building launcher-hide overlay...\n"
+            "Only WQW control metadata will be patched virtually; source image and ROM payload remain untouched."
+        )
+        self.rom_hide_button.setEnabled(False)
+        self.cancel_rom_hide_button.setEnabled(True)
+        self.rom_hide_worker = RomHideWorkspaceThread(image, query, output, overwrite=overwrite)
+        self.rom_hide_worker.progress.connect(self._rom_hide_progress)
+        self.rom_hide_worker.succeeded.connect(self._rom_hide_success)
+        self.rom_hide_worker.failed.connect(self._rom_hide_failure)
+        self.rom_hide_worker.finished.connect(self._rom_hide_finished)
+        self.rom_hide_worker.start()
+
+    def cancel_rom_hide_workspace(self):
+        if self.rom_hide_worker is not None and self.rom_hide_worker.isRunning():
+            self.rom_hide_worker.requestInterruption()
+            self.cancel_rom_hide_button.setEnabled(False)
+            self.rom_hide_result.append("Cancellation requested; no incomplete customisation workspace will be promoted.")
+
+    def _rom_hide_progress(self, message: str):
+        self.rom_hide_result.setPlainText(message)
+
+    def _rom_hide_success(self, result):
+        self.rom_hide_result.setPlainText(
+            "CUSTOMISATION WORKSPACE CREATED\n"
+            f"ROM hidden from launcher: {result.catalogue_code}:{result.rom_filename}\n"
+            f"Catalogue records removed: {result.catalogue_records_removed}\n"
+            f"ROOT records removed: {result.root_records_removed}\n"
+            f"Patch payload: {_fmt_bytes(result.patch_payload_bytes)}\n"
+            f"Workspace: {result.workspace_path}\n"
+            f"SHA-256: {result.workspace_sha256}\n"
+            "Source image modified: NO\n"
+            "Physical ROM payload removed: NO"
+        )
+        QMessageBox.information(
+            self,
+            "Hide-ROM overlay created",
+            f"{result.catalogue_code}:{result.rom_filename} is absent from the virtually patched launcher controls.\n\n"
+            "The 60 GB image and physical ROM payload remain untouched."
+        )
+
+    def _rom_hide_failure(self, message: str):
+        self.rom_hide_result.setPlainText("CUSTOMISATION WORKSPACE FAILED\n\n" + message)
+        QMessageBox.warning(self, "Customisation stopped", message)
+
+    def _rom_hide_finished(self):
+        self.rom_hide_button.setEnabled(True)
+        self.cancel_rom_hide_button.setEnabled(False)
+        if self.rom_hide_worker is not None:
+            self.rom_hide_worker.deleteLater()
+            self.rom_hide_worker = None
+
+    def select_custom_apply_source(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select healthy source image", "", "Disk Images (*.img *.bin);;All Files (*)"
+        )
+        if path:
+            self.custom_apply_source.setText(path)
+
+    def select_custom_apply_workspace(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select customisation overlay", "", "GameStick Customisation (*.gscustom);;All Files (*)"
+        )
+        if path:
+            self.custom_apply_workspace.setText(path)
+            if not self.custom_apply_rollback.text().strip():
+                self.custom_apply_rollback.setText(str(Path(path).resolve().with_suffix(".gsrollback")))
+
+    def select_custom_apply_target(self):
+        path = QFileDialog.getExistingDirectory(self, "Select mounted TEST/CLONE GameStick card root")
+        if path:
+            self.custom_apply_target.setText(path)
+
+    def select_custom_apply_rollback(self):
+        suggested = self.custom_apply_rollback.text().strip() or "gamestick_custom.gsrollback"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save host-side rollback archive", suggested, "GameStick Rollback (*.gsrollback)"
+        )
+        if path:
+            if not path.lower().endswith(".gsrollback"):
+                path += ".gsrollback"
+            self.custom_apply_rollback.setText(path)
+
+    def run_custom_apply(self):
+        source = self.custom_apply_source.text().strip()
+        workspace = self.custom_apply_workspace.text().strip()
+        target = self.custom_apply_target.text().strip()
+        rollback = self.custom_apply_rollback.text().strip()
+        if not source or not workspace or not target or not rollback:
+            QMessageBox.warning(
+                self,
+                "Apply inputs required",
+                "Select the healthy source image, .gscustom overlay, mounted TEST/CLONE card root, and host rollback output.",
+            )
+            return
+        phrase = expected_confirmation(target)
+        warning = (
+            "This operation WILL modify the selected mounted GameStick card.\n\n"
+            "Use a TEST/CLONE card only — not your only preserved original.\n"
+            "Only pre-attested launcher-control byte ranges are eligible; no file is resized and no ROM payload is deleted.\n"
+            "A host-side rollback archive is committed before the first write.\n\n"
+            f"Type exactly: {phrase}"
+        )
+        typed, ok = QInputDialog.getText(self, "Confirm bounded GameStick write", warning)
+        if not ok:
+            return
+        overwrite = False
+        if Path(rollback).exists():
+            answer = QMessageBox.question(
+                self,
+                "Existing rollback archive",
+                "Replace the existing host-side rollback archive?\n\nThe target card has not been modified yet.",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                return
+            overwrite = True
+        self.custom_apply_result.setPlainText(
+            "Preflighting source image, overlay provenance and mounted TEST card...\nNo target write occurs until every attestation passes."
+        )
+        self.custom_apply_button.setEnabled(False)
+        self.custom_rollback_button.setEnabled(False)
+        self.cancel_custom_apply_button.setEnabled(True)
+        self.custom_apply_worker = CustomApplyThread(
+            source, workspace, target, rollback,
+            confirmation=typed, overwrite_rollback=overwrite,
+        )
+        self.custom_apply_worker.progress.connect(self.custom_apply_result.setPlainText)
+        self.custom_apply_worker.succeeded.connect(self._custom_apply_success)
+        self.custom_apply_worker.failed.connect(self._custom_apply_failure)
+        self.custom_apply_worker.finished.connect(self._custom_apply_finished)
+        self.custom_apply_worker.start()
+
+    def cancel_custom_apply(self):
+        if self.custom_apply_worker is not None and self.custom_apply_worker.isRunning():
+            self.custom_apply_worker.requestInterruption()
+            self.cancel_custom_apply_button.setEnabled(False)
+            self.custom_apply_result.append(
+                "Cancellation requested. If target writing has begun, automatic rollback is attempted before failure returns."
+            )
+
+    def _custom_apply_success(self, result):
+        self.custom_apply_result.setPlainText(
+            "CUSTOMISATION APPLIED AND VERIFIED\n"
+            f"ROM hidden: {result.catalogue_code}:{result.rom}\n"
+            f"Target: {result.target_root}\n"
+            f"Patched files / ranges: {result.patched_file_count} / {result.patch_range_count}\n"
+            f"Bytes changed: {_fmt_bytes(result.patch_payload_bytes)}\n"
+            f"Rollback: {result.rollback_path}\n"
+            f"Rollback SHA-256: {result.rollback_sha256}\n"
+            f"Receipt: {result.receipt_path}\n"
+            f"Verification: {result.verification}\n"
+            "Physical ROM payload removed: NO\n\n"
+            "Safely eject the TEST card and boot the GameStick. Solitaire should be absent from the launcher."
+        )
+        QMessageBox.information(
+            self,
+            "Bounded customisation applied",
+            "The tiny launcher overlay was written and reread-verified.\n\n"
+            "Safely eject the TEST/CLONE card and boot it. The rollback archive is retained on the host.",
+        )
+
+    def _custom_apply_failure(self, message: str):
+        self.custom_apply_result.setPlainText("CUSTOMISATION APPLY FAILED\n\n" + message)
+        QMessageBox.warning(self, "Customisation apply stopped", message)
+
+    def _custom_apply_finished(self):
+        self.custom_apply_button.setEnabled(True)
+        self.custom_rollback_button.setEnabled(True)
+        self.cancel_custom_apply_button.setEnabled(False)
+        if self.custom_apply_worker is not None:
+            self.custom_apply_worker.deleteLater()
+            self.custom_apply_worker = None
+
+    def run_custom_rollback(self):
+        rollback = self.custom_apply_rollback.text().strip()
+        target = self.custom_apply_target.text().strip()
+        if not rollback or not target:
+            QMessageBox.warning(self, "Rollback inputs required", "Select the .gsrollback archive and mounted TEST card root.")
+            return
+        drive = Path(target).drive.upper() or Path(target).name
+        phrase = f"ROLL BACK {drive}"
+        typed, ok = QInputDialog.getText(
+            self,
+            "Confirm bounded rollback",
+            "This restores only the original byte ranges captured before the overlay write.\n\n"
+            f"Type exactly: {phrase}",
+        )
+        if not ok:
+            return
+        self.custom_apply_result.setPlainText("Validating replacement state before rollback...")
+        self.custom_apply_button.setEnabled(False)
+        self.custom_rollback_button.setEnabled(False)
+        self.cancel_custom_apply_button.setEnabled(False)
+        self.custom_rollback_worker = CustomRollbackThread(rollback, target, confirmation=typed)
+        self.custom_rollback_worker.progress.connect(self.custom_apply_result.setPlainText)
+        self.custom_rollback_worker.succeeded.connect(self._custom_rollback_success)
+        self.custom_rollback_worker.failed.connect(self._custom_apply_failure)
+        self.custom_rollback_worker.finished.connect(self._custom_rollback_finished)
+        self.custom_rollback_worker.start()
+
+    def _custom_rollback_success(self, result):
+        self.custom_apply_result.setPlainText(
+            "CUSTOMISATION ROLLED BACK AND VERIFIED\n"
+            f"Target: {result.target_root}\n"
+            f"Restored files / ranges: {result.restored_file_count} / {result.restored_range_count}\n"
+            f"Restored bytes: {_fmt_bytes(result.restored_bytes)}\n"
+            f"Verification: {result.verification}"
+        )
+        QMessageBox.information(self, "Rollback complete", "Original launcher-control bytes were restored and reread-verified.")
+
+    def _custom_rollback_finished(self):
+        self.custom_apply_button.setEnabled(True)
+        self.custom_rollback_button.setEnabled(True)
+        if self.custom_rollback_worker is not None:
+            self.custom_rollback_worker.deleteLater()
+            self.custom_rollback_worker = None
+
     def select_compare_images(self):
         paths, _ = QFileDialog.getOpenFileNames(
             self,
@@ -1799,9 +2319,10 @@ class AboutTab(QWidget):
             f"GameStick Inspector {VERSION}\n\n"
             "Goal: identify the exact card, partition layout, launcher metadata and visible structure before "
             "any customization code is permitted.\n\n"
-            "Safety invariant: the active build can read the physical GameStick device to create a verified-transfer full image, "
-            "but contains no code path that writes raw sectors, formats, erases, restores, flashes, copies ROMs to, "
-            "or otherwise modifies the selected GameStick volume.\n\n"
+            "Safety invariant: raw restore, format, erase, firmware flash and ROM-payload write paths remain absent. "
+            "The only GameStick modification authority is the Customise page's bounded .gscustom apply path: it requires "
+            "a verified source image, exact control/original-byte attestations, a TEST/CLONE target, typed confirmation, "
+            "a host-side rollback snapshot before first write, and mandatory reread verification.\n\n"
             "Evidence bundles contain only generated structural reports and integrity metadata; they do not copy "
             "ROMs or configuration files from the card.\n\n"
             "Executable legacy destructive prototype code is intentionally excluded from release archives."
@@ -1812,7 +2333,7 @@ class AboutTab(QWidget):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle(f"GameStick Inspector — {VERSION} (Safety-First Imaging Build)")
+        self.setWindowTitle(f"GameStick Inspector — {VERSION} (Safety-First Customisation Build)")
         self.resize(1120, 760)
         tabs = QTabWidget()
         inspector = InspectorTab()

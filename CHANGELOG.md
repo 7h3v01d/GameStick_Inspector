@@ -1,31 +1,36 @@
-## 0.5.0-alpha11 — fast host-side repair workspace
-
-- Added a small `.gsworkspace` repair-overlay format instead of materializing another 60 GB raw image.
-- Repair candidates are selected automatically: golden control must be VERIFIED, repair-base control damaged/unreadable, and DAT file sizes identical.
-- Workspace payloads are validated as WQW catalogues and their canonical `filelist.txt` controls are CRC/decompression checked before packaging.
-- Manifest binds each replacement to the damaged base DAT hash and FAT-chain fingerprint for future fail-closed application.
-- Completed workspace archives are reopened and payload-hash verified before atomic promotion.
-- Added GUI and `repair_workspace.bat`; source images remain read-only and no GameStick write path is enabled.
-
-## 0.5.0-alpha10 — Surgical Catalogue Lab / short-loop pivot
-
-- Adds raw-image catalogue comparison that reads only FAT metadata, WQW central directories, `filelist.txt`, and `fileinfo.txt`.
-- No ROM payloads or artwork are scanned; no additional SD-card acquisition is required.
-- Per-catalogue results distinguish identical controls, list differences, byte-only control differences, and damaged/unreadable controls.
-- Bounded catalogue ROM-name differences are exported to the host-side JSON report for actionable customisation analysis.
-- Adds GUI and `catalogue_compare.bat` / `catalogue_compare_cli.py` entry points.
-- Keeps all source images read-only and adds no image/SD write authority.
-
-## 0.5.0-alpha9 — Fast Image Lab / pace-first pivot
-
-- Stops requiring repeated full-card acquisitions for the current customisation investigation.
-- Adds a read-only FAT32 raw-image inspector that reads filesystem metadata and bounded launcher/control files instead of scanning all ~60 GB.
-- Adds fast two-image logical comparison with launcher/control hash comparison and bounded JSON differences.
-- Adds GUI and CLI entry points (`fast_compare.bat`).
-- Full byte/sector comparison remains available as an optional deep diagnostic rather than the default next step.
-- Preserves the existing no-restore/no-ROM-write/no-firmware-write safety boundary.
-
 # Changelog
+
+
+## 0.5.0-alpha13.1 — Windows rollback durability fix
+
+- Fixes `[Errno 9] Bad file descriptor` on Windows during pre-write rollback archive durability commit.
+- The rollback staging ZIP is now reopened `r+b` before `flush`/`fsync`; Windows requires a writable descriptor for `_commit`.
+- Failure occurs before `write_started`, so an alpha13 failure at this point leaves the target card untouched.
+- Adds a regression that emulates Windows rejecting `fsync` on read-only descriptors.
+
+## 0.5.0-alpha13 — bounded customisation apply / rollback
+
+- Added the first deliberately narrow GameStick write authority: applying a pre-built `.gscustom` launcher-control overlay to an explicitly selected **TEST/CLONE** mounted card.
+- No 60 GB rewrite is required. Only the exact fixed-size byte ranges recorded in the overlay are eligible for modification.
+- Before target write authority is granted, Inspector revalidates the healthy source image's size, FAT-chain fingerprints, source control hashes and original patch-byte hashes.
+- The mounted target is separately revalidated for GameStick layout, expected file sizes, source control hashes and original patch bytes. Windows targets must map to a non-boot/non-system removable USB/SD/MMC disk.
+- A host-side `.gsrollback` snapshot is atomically committed before the first target write.
+- Target writes are flushed, exact replacement ranges are reread, and the patched `filelist.txt` / `fileinfo.txt` controls are fully decompressed/CRC-verified before success is reported.
+- Any failure after target modification begins triggers immediate restoration from the in-memory pre-write snapshot; the host rollback archive is retained regardless.
+- Added bounded verified rollback support that refuses to restore unless the target still matches the recorded replacement state.
+- Added `custom_apply.bat` / `src/custom_apply_cli.py` and Customise-page GUI controls.
+- Raw restore, firmware flash, format/repartition and physical ROM-payload add/delete remain locked.
+
+## 0.5.0-alpha12 — fast launcher Hide-ROM overlay
+
+- Added the first real host-side ROM customisation path without introducing source-image or GameStick writes.
+- A selected existing ROM is removed synchronously from its numbered `filelist.txt` and `ROOT.DAT` `fileinfo.txt`.
+- WQW controls are patched in fixed-size slots; DAT sizes and FAT cluster allocation remain unchanged.
+- Generated patches are virtually reapplied and CRC/decompression validated before a `.gscustom` workspace is promoted.
+- Workspace payloads contain only changed control-byte ranges and provenance hashes; physical ROM payloads remain untouched.
+- Ambiguous ROM searches fail closed and support explicit `CODE:filename` disambiguation.
+- **242 automated tests passed; 1 Qt smoke test skipped in the packaging environment.**
+
 
 ## 0.5.0-alpha8.3 — late source-revalidation resilience / verified-stage preservation
 

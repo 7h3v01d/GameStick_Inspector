@@ -143,3 +143,8 @@ Baseline comparison is read-only and host-side. A prior evidence ZIP is never ex
 Cross-run comparison reuses previously exported prefix/tail fingerprint commitments and privacy-safe structural/control metadata. Alpha6 does not add new DAT sampled-region digest commitments. The result therefore distinguishes current-session read stability from evidence changes observed between probe sessions without granting any source-write authority.
 
 Dominant-alias classification is also counts-only. Catalogue filenames remain private in memory; only three-digit catalogue codes, counts and bounded rate fields leave the process.
+
+
+## Bounded customisation apply (alpha13)
+
+The only selected-GameStick write authority in alpha13 is the `.gscustom` apply path. It is intentionally narrower than raw restore: the target must be an explicitly selected TEST/CLONE mounted card; a healthy source image and overlay provenance are revalidated; exact existing target bytes must match; a host rollback archive is committed before first write; file sizes and FAT allocation are not changed; and replacement bytes plus WQW controls are reread/verified. Raw restore, format/repartition, firmware flash and ROM-payload add/delete remain unavailable.

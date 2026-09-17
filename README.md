@@ -1,7 +1,46 @@
-# GameStick Inspector 0.5.0-alpha11
+# GameStick Inspector 0.5.0-alpha13.1
+
+> **alpha13.1 Windows apply fix:** fixes a Windows-only `[Errno 9] Bad file descriptor` during rollback-archive durability commit. The target is still not written until the host rollback archive is durably committed.
+
+> **alpha13 bounded hardware-test apply:** a verified `.gscustom` overlay can now be applied directly to a mounted **TEST/CLONE** GameStick card without rewriting the full ~60 GB image. Inspector revalidates the healthy source-image FAT-chain/control provenance, validates the target card's exact source control hashes and original patch bytes, commits a host-side `.gsrollback` before the first write, writes only the pre-attested fixed-size control ranges, and rereads the replacement bytes/WQW controls before declaring success.
+
+## 0.5.0-alpha13.1 — bounded one-pass customisation apply
+
+- Adds **Apply Overlay to TEST/CLONE Card — BOUNDED WRITE** under the responsive `Customise` workflow page.
+- Requires the healthy source `.img`, the `.gscustom` overlay, a mounted target card root, and a host-side `.gsrollback` destination.
+- Revalidates the workspace against the healthy source image before any target write: image size, FAT-chain fingerprint, source control SHA-256, and exact original patch-byte hashes must all match.
+- Revalidates the mounted target independently: GameStick layout markers, exact DAT/ROOT file sizes, source control SHA-256 values, and original patch bytes must match.
+- On Windows, the target must be a local drive root positively mapped to a non-boot/non-system removable USB/SD/MMC device.
+- Requires an exact typed confirmation phrase naming the selected target.
+- Commits a `.gsrollback` archive on the host before the first target byte is modified.
+- Writes only the fixed-size byte ranges described by the overlay; no file is resized, FAT allocation is not changed, and the physical ROM payload remains present.
+- Flushes and rereads every replacement range and both patched WQW controls. A post-write failure triggers immediate in-memory rollback and retains the host rollback archive.
+- Adds verified **Undo Using `.gsrollback`** support. Rollback is accepted only when the target still matches the replacement state recorded by the archive.
+- CLI: `custom_apply.bat apply <healthy.img> <overlay.gscustom> <target-root> <rollback.gsrollback>` and `custom_apply.bat rollback <rollback.gsrollback> <target-root>`.
+- Raw restore, formatting, repartitioning, firmware flashing and ROM-payload add/delete remain unavailable.
+
+
+> **alpha12 ROM Customisation Lab:** first real launcher customisation is now available as a tiny host-side overlay. Choose a healthy reference image and an existing ROM; Inspector removes that ROM from both the numbered `filelist.txt` and `ROOT.DAT` `fileinfo.txt` in a virtually validated fixed-slot WQW patch. The 60 GB source image and physical ROM payload are not modified.
+
+## 0.5.0-alpha12 — fast Hide-ROM overlay
+
+- Adds **ROM Customisation Lab — FAST host-side launcher hide** to Recovery & Images.
+- Resolves a ROM by exact filename or distinctive title fragment across verified numbered catalogues; ambiguous results fail closed and can be disambiguated with `CODE:filename`.
+- Removes the selected ROM from both its numbered `filelist.txt` and `ROOT.DAT` `fileinfo.txt`; a half-synchronised result is refused.
+- Rebuilds only the affected WQW control record in its existing fixed byte slot. It never shifts the DAT file, changes its file size, or reallocates FAT clusters.
+- Reuses the old compressed-member slot by expanding the ZIP/WQW local extra field when the new control compresses smaller; if the replacement cannot fit safely, the operation fails closed.
+- Virtually overlays the generated patch bytes back onto the source image reader and re-runs WQW decompression/CRC validation before packaging.
+- Creates a tiny `.gscustom` ZIP containing only changed control-byte ranges plus a manifest bound to source control hashes and FAT-chain fingerprints.
+- The physical ROM file remains present; this milestone hides/removes it from launcher menus only. Direct ROM payload addition/deletion and SD writes remain locked.
+- CLI: `rom_hide.bat <healthy.img> <rom-query> <output.gscustom>`.
+- Release validation: **242 passed, 1 Qt smoke test skipped** in the packaging environment.
 
 
 > **alpha11 Fast Repair Workspace:** turn verified golden catalogue data into a small host-side repair overlay without copying or modifying either 60 GB image. The builder auto-selects only catalogues that are VERIFIED in the golden image and damaged/unreadable in the repair base, requires an identical DAT file size, and revalidates the replacement WQW/filelist before packaging it.
+
+## 0.5.0-alpha12.1 — Recovery UI layout
+
+`Recovery & Images` is now split into five workflow pages (`Image & Verify`, `Fast Analysis`, `Repair`, `Customise`, `Advanced`) instead of stacking every tool into one compressed screen. The underlying operations and safety boundaries are unchanged.
 
 ## 0.5.0-alpha11 — Fast Repair Workspace
 

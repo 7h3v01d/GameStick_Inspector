@@ -34,7 +34,26 @@ def test_main_window_constructs_with_browser_invalidation_slot():
     window = MainWindow()
     try:
         assert hasattr(BrowserTab, "clear_view")
-        assert "0.5.0-alpha10" in window.windowTitle()
+        assert "0.5.0-alpha12.1" in window.windowTitle()
     finally:
         window.close()
         app.processEvents()
+
+
+def test_recovery_ui_is_split_into_scrollable_workflows_statically():
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "src" / "gamestick" / "ui.py").read_text(encoding="utf-8")
+
+    assert "self.workflow_tabs = QTabWidget()" in source
+    assert "scroll = QScrollArea()" in source
+    assert "scroll.setWidgetResizable(True)" in source
+    for label in ("Image & Verify", "Fast Analysis", "Repair", "Customise", "Advanced"):
+        assert f'addTab(' in source and f'"{label}"' in source
+
+    # Regression guard: each major recovery workflow belongs to one page, not the root stack.
+    assert "imaging_layout.addWidget(create_group)" in source
+    assert "analysis_layout.addWidget(fast_group)" in source
+    assert "analysis_layout.addWidget(catalogue_group)" in source
+    assert "repair_page_layout.addWidget(repair_group)" in source
+    assert "customise_page_layout.addWidget(custom_group)" in source
+    assert "advanced_layout.addWidget(compare_group)" in source
