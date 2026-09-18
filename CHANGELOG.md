@@ -1,5 +1,52 @@
 # Changelog
 
+## 0.5.0-alpha17 — opened-handle binding / durable recovery identity
+
+- No new ROM capability; closes the alpha16 target-handle binding blocker and recovery-lifetime identity issue.
+- Every opened target DAT/ROOT handle is independently resolved to a Windows Volume-GUID path and must match the verified volume plus exact relative file before apply or rollback can write.
+- Root/physical-disk rebinding remains in place as defence in depth.
+- Introduces rollback-v3 and apply-receipt-v2 with distinct live attachment identity and durable media identity.
+- Durable recovery ownership excludes ephemeral `PhysicalDriveN` and drive-letter attachment state while retaining strong media/partition/volume provenance.
+- Legacy rollback-v1/v2 is explicit recovery-only and remains subject to canonical semantic inverse proof.
+- Adds exact two-clone one-handle-substitution regressions for both apply and rollback, plus same-media/different-disk-number and different-media recovery tests.
+- Validation: 276 passed, 1 skipped in the packaging environment.
+
+## 0.5.0-alpha16 — rollback authority / partial-write hardening
+
+- No new feature capability; closes the two fresh HIGH blockers from the alpha15 adversarial review.
+- `.gsrollback` is now treated as evidence, not authority. Before restore, the live customized controls are combined with claimed original bytes to reconstruct a virtual pre-hide state and prove one exact canonical hide/unhide semantic transition.
+- Rollback-v2 requires mandatory workspace SHA-256, target identity, ROM identity and canonical operation provenance; legacy-v1 requires explicit recovery opt-in and still passes semantic proof.
+- Canonical restore authority is exactly one numbered DAT + `ROOT.DAT`, two fixed-slot ranges per file. Arbitrary DAT metadata/control patch claims are refused before writes.
+- Apply marks the transaction potentially destructive before the first write call; short/partial writes and write-then-raise failures now restore and reread-verify originals or escalate to `RECOVERY REQUIRED`.
+- Adds exact adversarial regressions for the alpha15 review attacks.
+- Validation: 270 passed, 1 skipped in the packaging environment.
+
+
+## 0.5.0-alpha15 — transaction authority / atomicity hardening
+
+- No new customization capability; this release closes the adversarial write-authority and transaction findings from alpha14.
+- `.gscustom` no longer defines its own write authority. Apply independently re-derives the canonical hide from healthy image + exact `catalogue code + filename` and requires exact two-file/four-range patch equality.
+- Destructive TEST/CLONE apply/rollback is Windows-only in production and rebinds physical target identity immediately before writes through already-open target handles.
+- Rollback/receipt outputs are physically separated from the target media and bound to a verified host volume.
+- Receipt destination is reserved before target writes, existing receipts require explicit overwrite authority, and receipt commit is inside the apply transaction; a commit failure restores and verifies originals.
+- Rollback now has compensating transaction semantics and emits explicit `RECOVERY REQUIRED` if coherent compensation cannot be verified.
+- Added strict pre-decompression ZIP metadata bounds for `.gscustom` and `.gsrollback`.
+- ROM Manager casefold path resolution now uses bounded forensic scandir primitives.
+- Unhide provenance is backend-enforced against actual rollback SHA-256, exact ROM identity, receipt status/schema, and target identity where available.
+- Added regressions for the demonstrated forged-write-set, forged-ROM-identity, target-substitution, receipt-failure, half-rollback, same-disk rollback, archive-expansion, receipt-ownership, and unbounded-enumeration attacks.
+- **265 tests passed; 1 Qt smoke test skipped** in the packaging environment.
+
+## 0.5.0-alpha14 — ROM Manager
+
+- Added a fast, searchable manager over the verified numbered `filelist.txt` catalogues.
+- Added optional read-only comparison against a mounted TEST/CLONE card, with exact `VISIBLE` / `HIDDEN` / `INCONSISTENT` / `UNREADABLE` / `TARGET_ONLY` state.
+- Exact identity is `catalogue code + ROM filename`; similarly named games are never collapsed.
+- Selected visible/reference entries can feed the existing tiny hide-overlay builder without free-text ambiguity.
+- Selected hidden entries can be restored with the matching `.gsrollback`; the sibling apply receipt must prove that the rollback belongs to the selected ROM.
+- Manager scans do not read ROM payload files and do not perform a full-image scan.
+- Added `rom_manager.bat` CLI and regression coverage proving hide state is detected and returns to visible after verified rollback.
+- Existing alpha13.1 bounded apply safety and rollback-before-write rules remain unchanged.
+
 
 ## 0.5.0-alpha13.1 — Windows rollback durability fix
 

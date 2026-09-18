@@ -13,9 +13,9 @@ The resulting profile is explicitly marked `CANDIDATE`. A high-ranked launcher a
 
 ## Primary invariant
 
-**The GameStick is a read-only evidence source until its exact layout and consistency model are understood.**
+**Inspection, discovery, catalogue analysis and raw imaging remain strictly read-only.**
 
-No active code path restores, formats, flashes, modifies ROMs, edits launcher metadata, or opens the GameStick raw device for write access.
+The only selected-GameStick write authority is the separately gated **TEST/CLONE customization transaction**. It is constrained to independently re-derived launcher-control bytes for an exact `catalogue code + ROM filename`, requires mandatory rollback/receipt artifacts on a different verified physical disk, rebinds the selected physical target immediately before writes, and reread-verifies the resulting coherent state. Raw restore, formatting/repartitioning, firmware flashing and physical ROM-payload add/delete remain unavailable.
 
 ## Read-side filesystem containment
 
@@ -148,3 +148,37 @@ Dominant-alias classification is also counts-only. Catalogue filenames remain pr
 ## Bounded customisation apply (alpha13)
 
 The only selected-GameStick write authority in alpha13 is the `.gscustom` apply path. It is intentionally narrower than raw restore: the target must be an explicitly selected TEST/CLONE mounted card; a healthy source image and overlay provenance are revalidated; exact existing target bytes must match; a host rollback archive is committed before first write; file sizes and FAT allocation are not changed; and replacement bytes plus WQW controls are reread/verified. Raw restore, format/repartition, firmware flash and ROM-payload add/delete remain unavailable.
+
+
+## ROM Manager (alpha14)
+
+The ROM Manager is read-only while scanning. It reads the healthy reference image FAT and launcher control members, and optionally opens mounted numbered DAT/ROOT controls read-only to classify exact ROM identities as visible/hidden/inconsistent. It does not read ROM payload files. Hide still produces a host-side `.gscustom`; target modification remains exclusively the alpha13 bounded apply path. Manager unhide delegates to the existing verified `.gsrollback` path and additionally requires the sibling apply receipt to match the selected `catalogue code + filename` identity.
+
+## Transaction authority hardening (alpha15)
+
+A `.gscustom` archive is untrusted input and never grants write authority by itself. Apply re-derives the canonical hide operation from the healthy image plus exact ROM identity and requires the workspace patch topology, source/replacement bytes, ranges, payloads and provenance to match exactly. For the current Hide-ROM operation the only authorized topology is one numbered `NNN/NNN.DAT` control change plus the matching `ROOT.DAT` mirror change, represented by exactly four fixed-size ranges total.
+
+Production apply/rollback is Windows-only. The TEST/CLONE target is bound to physical disk/partition identity and re-queried after the exact target files are opened; write authority is then exercised through those already-open handles. Rollback and receipt outputs must resolve to a different verified physical disk from the target and are bound to a stable host volume.
+
+Receipt commitment is part of the apply transaction. The destination is reserved before target mutation; an existing receipt requires explicit overwrite authority. If final receipt commit fails after target writes, the original target bytes are restored and reread-verified before failure returns. Rollback is itself compensating: if restoration fails partway, already-restored ranges are returned to the captured customized state and reread-verified. If coherent compensation cannot be established, the operation reports **RECOVERY REQUIRED** and retains the host rollback archive.
+
+Both `.gscustom` and `.gsrollback` enforce ZIP member/count/expanded-size/compression/encryption bounds from `ZipInfo` metadata before member decompression. ROM Manager casefold resolution reuses bounded forensic directory enumeration. Receipt-bound unhide provenance is verified in backend code against the actual rollback SHA-256, exact ROM identity, receipt state and target identity where available.
+
+
+
+## Rollback authority / partial-write hardening (alpha16)
+
+A `.gsrollback` archive is untrusted evidence and cannot authorize its own writes. Normal rollback requires rollback-v2 provenance and then independently proves authority from the live customized target plus the archive's claimed original bytes. Inspector virtually reconstructs the pre-hide `filelist.txt` and `ROOT.DAT/fileinfo.txt`, proves that exactly one `catalogue code + filename` was removed by the canonical hide transformation, and re-derives the exact fixed-slot write ranges. Authority is granted only when the claim equals one numbered DAT plus `ROOT.DAT`, two ranges each, four ranges total, with exact current/original bytes. Receipt/hash provenance supplements this proof but never substitutes for it.
+
+Rollback-v1 is legacy recovery only and is refused by default. An explicit legacy-recovery opt-in is required, and the same semantic inverse proof remains mandatory before any write. ROM Manager, general GUI rollback and CLI rollback share the same backend authority model.
+
+For apply, the target transaction is considered potentially destructive immediately before the first writable mutation call. Any subsequent short write, partial-write exception, flush/fsync error, verification failure or receipt-commit failure enters restoration. Success after failure requires reread-verification of the complete original state; otherwise the result is **RECOVERY REQUIRED**. This rule deliberately assumes removable-media writes may have altered bytes even when the write API reports failure.
+
+
+## Opened-handle binding / durable recovery identity (alpha17)
+
+A drive-letter/root revalidation is not sufficient write authority. On Windows, after each target DAT/ROOT file is opened, Inspector resolves the **already-open OS handle** with `GetFinalPathNameByHandleW` using Volume-GUID naming and requires an exact match to the verified target Volume GUID and exact relative file. Both target handles must pass this check before apply or rollback can mutate bytes. The existing physical-disk/root requery remains mandatory as a second independent layer.
+
+Rollback provenance now separates two identity concepts. **Attachment identity** is session-specific and includes the current `PhysicalDriveN`; it is used for immediate transaction rebinding. **Durable media identity** is stored for recovery ownership and excludes `disk_number` and drive-letter attachment state. It retains disk/partition size and geometry, stable partition-layout data with drive letters removed, serial/unique-ID hashes where available, and the stable Volume-GUID identity. This permits the same physical card to be safely recognized after unplug/replug or reboot while still refusing a different device.
+
+New rollback archives use rollback-v3 and new apply receipts use receipt-v2. Rollback-v1/v2 is explicit legacy recovery only and remains subject to the same canonical semantic inverse proof before any write.

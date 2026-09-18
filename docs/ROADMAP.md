@@ -73,3 +73,13 @@ Only after the exact firmware layout is understood: themes, artwork, BIOS/config
 ## Future raw restore
 
 Raw restore remains intentionally absent. Before implementation it requires a separate write-side threat model, target identity binding, lock/dismount strategy, power-loss/cancellation test matrix, write verification and explicit human interlocks.
+
+
+## ROM customisation milestones
+
+- [x] Prove bounded launcher-only hide operation on real GameStick hardware.
+- [x] Fast ROM Manager: reference catalogue browse/search + mounted-card visibility state.
+- [x] Selected-entry hide overlay and receipt-bound rollback/unhide.
+- [ ] Physical ROM payload removal with catalogue/FAT safety.
+- [ ] New ROM payload injection + catalogue/image metadata generation.
+- [ ] Batch customisation plan with one bounded hardware commit.

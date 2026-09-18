@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gamestick-inspector"
-version = "0.5.0a13.post1"
-description = "Safety-first GameStick inspector with read-only Device Profile discovery and verified raw imaging"
+version = "0.5.0a17"
+description = "Safety-first GameStick inspector with read-only inspection/imaging and explicitly gated TEST/CLONE customization transactions"
 requires-python = ">=3.10"
 dependencies = ["PyQt5==5.15.11"]
 

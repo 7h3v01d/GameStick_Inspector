@@ -5,7 +5,7 @@ import os
 import sys
 from pathlib import Path
 
-from PyQt5.QtCore import QThread, pyqtSignal
+from PyQt5.QtCore import QThread, pyqtSignal, Qt
 from PyQt5.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -36,12 +36,13 @@ from .fast_image_lab import compare_fast_structures
 from .catalogue_image_lab import compare_catalogue_controls
 from .repair_workspace import build_repair_workspace
 from .rom_customization import build_hide_rom_workspace
-from .custom_apply import apply_customization_workspace, expected_confirmation, rollback_customization
+from .rom_manager import scan_rom_manager
+from .custom_apply import apply_customization_workspace, expected_confirmation, rollback_customization, verify_rollback_receipt_for_rom
 from .probe import find_candidate_volumes, inspect_volume
 from .reporting import write_evidence_bundle, write_probe_report
 from .windows_privilege import is_process_elevated, relaunch_current_app_elevated
 
-VERSION = "0.5.0-alpha13.1"
+VERSION = "0.5.0-alpha17"
 _BROWSER_PER_DIRECTORY_LIMIT = 1000
 _BROWSER_TOTAL_NODE_LIMIT = 5000
 
@@ -880,12 +881,35 @@ class RomHideWorkspaceThread(QThread):
             self.failed.emit(str(exc))
 
 
+class RomManagerScanThread(QThread):
+    progress = pyqtSignal(str)
+    succeeded = pyqtSignal(object)
+    failed = pyqtSignal(str)
+
+    def __init__(self, reference_image, target_root=None):
+        super().__init__()
+        self.reference_image = reference_image
+        self.target_root = target_root
+
+    def run(self):
+        try:
+            result = scan_rom_manager(
+                self.reference_image,
+                self.target_root,
+                progress=self.progress.emit,
+                cancelled=self.isInterruptionRequested,
+            )
+            self.succeeded.emit(result)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
 class CustomApplyThread(QThread):
     progress = pyqtSignal(str)
     succeeded = pyqtSignal(object)
     failed = pyqtSignal(str)
 
-    def __init__(self, source_image, workspace, target_root, rollback_path, *, confirmation, overwrite_rollback=False):
+    def __init__(self, source_image, workspace, target_root, rollback_path, *, confirmation, overwrite_rollback=False, overwrite_receipt=False):
         super().__init__()
         self.source_image = source_image
         self.workspace = workspace
@@ -893,6 +917,7 @@ class CustomApplyThread(QThread):
         self.rollback_path = rollback_path
         self.confirmation = confirmation
         self.overwrite_rollback = overwrite_rollback
+        self.overwrite_receipt = overwrite_receipt
 
     def run(self):
         try:
@@ -903,6 +928,7 @@ class CustomApplyThread(QThread):
                 self.rollback_path,
                 confirmation=self.confirmation,
                 overwrite_rollback=self.overwrite_rollback,
+                overwrite_receipt=self.overwrite_receipt,
                 progress=self.progress.emit,
                 cancelled=self.isInterruptionRequested,
             )
@@ -916,11 +942,14 @@ class CustomRollbackThread(QThread):
     succeeded = pyqtSignal(object)
     failed = pyqtSignal(str)
 
-    def __init__(self, rollback_path, target_root, *, confirmation):
+    def __init__(self, rollback_path, target_root, *, confirmation, receipt_path=None, expected_rom=None, allow_legacy_recovery=False):
         super().__init__()
         self.rollback_path = rollback_path
         self.target_root = target_root
         self.confirmation = confirmation
+        self.receipt_path = receipt_path
+        self.expected_rom = expected_rom
+        self.allow_legacy_recovery = allow_legacy_recovery
 
     def run(self):
         try:
@@ -929,6 +958,9 @@ class CustomRollbackThread(QThread):
                 self.target_root,
                 confirmation=self.confirmation,
                 progress=self.progress.emit,
+                receipt_path=self.receipt_path,
+                expected_rom=self.expected_rom,
+                allow_legacy_recovery=self.allow_legacy_recovery,
             )
             self.succeeded.emit(result)
         except Exception as exc:
@@ -971,6 +1003,10 @@ class RecoveryTab(QWidget):
         self.repair_workspace_images = []
         self.rom_hide_worker = None
         self.rom_hide_image = None
+        self.rom_manager_worker = None
+        self.rom_manager_rollback_worker = None
+        self.rom_manager_entries = ()
+        self._rom_manager_summary_base = "Manager not loaded."
         self.custom_apply_worker = None
         self.custom_rollback_worker = None
         self.compare_worker = None
@@ -1215,12 +1251,12 @@ class RecoveryTab(QWidget):
         repair_layout.addWidget(self.repair_workspace_result)
         repair_page_layout.addWidget(repair_group)
 
-        custom_group = QGroupBox("ROM Customisation Lab — FAST host-side launcher hide")
+        custom_group = QGroupBox("ROM Manager — browse/search + exact launcher state")
         custom_layout = QVBoxLayout(custom_group)
         custom_note = QLabel(
-            "First real customisation path. Select the healthy reference image, enter an existing ROM filename/title, "
-            "and create a tiny .gscustom overlay that removes the ROM from both numbered filelist.txt and ROOT.DAT "
-            "fileinfo.txt. The physical ROM payload and 60 GB source image remain untouched."
+            "Fast manager for the proven launcher controls. It inventories the healthy reference image and, optionally, "
+            "compares a mounted TEST/CLONE card read-only. Identity is catalogue code + exact ROM filename, so similarly "
+            "named games remain independent. ROM payloads are never read by the manager."
         )
         custom_note.setWordWrap(True)
         custom_layout.addWidget(custom_note)
@@ -1234,16 +1270,58 @@ class RecoveryTab(QWidget):
         custom_image_row.addWidget(custom_image_button)
         custom_layout.addLayout(custom_image_row)
 
-        query_row = QHBoxLayout()
-        query_row.addWidget(QLabel("ROM filename/title:"))
-        self.rom_hide_query = QLineEdit()
-        self.rom_hide_query.setPlaceholderText("e.g. Solitaire.zip  (or 003:Solitaire.zip if ambiguous)")
-        query_row.addWidget(self.rom_hide_query, 1)
-        custom_layout.addLayout(query_row)
+        target_row = QHBoxLayout()
+        self.rom_manager_target = QLineEdit()
+        self.rom_manager_target.setReadOnly(True)
+        self.rom_manager_target.setPlaceholderText("Optional mounted TEST/CLONE card — enables VISIBLE/HIDDEN state")
+        target_button = QPushButton("Select mounted TEST card...")
+        target_button.clicked.connect(self.select_rom_manager_target)
+        target_clear = QPushButton("Clear target")
+        target_clear.clicked.connect(self.clear_rom_manager_target)
+        target_row.addWidget(self.rom_manager_target, 1)
+        target_row.addWidget(target_button)
+        target_row.addWidget(target_clear)
+        custom_layout.addLayout(target_row)
+
+        scan_row = QHBoxLayout()
+        self.rom_manager_scan_button = QPushButton("Load / Refresh ROM Manager")
+        self.rom_manager_scan_button.setStyleSheet("font-weight: bold;")
+        self.rom_manager_scan_button.clicked.connect(self.run_rom_manager_scan)
+        self.cancel_rom_manager_scan_button = QPushButton("Cancel scan")
+        self.cancel_rom_manager_scan_button.setEnabled(False)
+        self.cancel_rom_manager_scan_button.clicked.connect(self.cancel_rom_manager_scan)
+        self.rom_manager_summary = QLabel("Manager not loaded.")
+        self.rom_manager_summary.setWordWrap(True)
+        scan_row.addWidget(self.rom_manager_scan_button)
+        scan_row.addWidget(self.cancel_rom_manager_scan_button)
+        scan_row.addWidget(self.rom_manager_summary, 1)
+        custom_layout.addLayout(scan_row)
+
+        filter_row = QHBoxLayout()
+        filter_row.addWidget(QLabel("Search:"))
+        self.rom_manager_search = QLineEdit()
+        self.rom_manager_search.setPlaceholderText("filename, title fragment, or 003:filename")
+        self.rom_manager_search.textChanged.connect(self._refresh_rom_manager_view)
+        self.rom_manager_hidden_only = QCheckBox("Hidden only")
+        self.rom_manager_hidden_only.stateChanged.connect(self._refresh_rom_manager_view)
+        filter_row.addWidget(self.rom_manager_search, 1)
+        filter_row.addWidget(self.rom_manager_hidden_only)
+        custom_layout.addLayout(filter_row)
+
+        self.rom_manager_tree = QTreeWidget()
+        self.rom_manager_tree.setHeaderLabels(["Code", "ROM filename", "State"])
+        self.rom_manager_tree.setRootIsDecorated(False)
+        self.rom_manager_tree.setAlternatingRowColors(True)
+        self.rom_manager_tree.setMinimumHeight(320)
+        self.rom_manager_tree.setColumnWidth(0, 70)
+        self.rom_manager_tree.setColumnWidth(1, 560)
+        self.rom_manager_tree.itemSelectionChanged.connect(self._rom_manager_selection_changed)
+        custom_layout.addWidget(self.rom_manager_tree)
 
         custom_output_row = QHBoxLayout()
         self.rom_hide_output = QLineEdit()
         self.rom_hide_output.setReadOnly(True)
+        self.rom_hide_output.setPlaceholderText("Hide overlay output is chosen automatically from the selected ROM")
         custom_output_button = QPushButton("Choose .gscustom output...")
         custom_output_button.clicked.connect(self.select_rom_hide_output)
         custom_output_row.addWidget(self.rom_hide_output, 1)
@@ -1251,18 +1329,21 @@ class RecoveryTab(QWidget):
         custom_layout.addLayout(custom_output_row)
 
         custom_actions = QHBoxLayout()
-        self.rom_hide_button = QPushButton("Build Hide-ROM Overlay")
+        self.rom_hide_button = QPushButton("Build Hide Overlay for Selected")
         self.rom_hide_button.clicked.connect(self.run_rom_hide_workspace)
-        self.cancel_rom_hide_button = QPushButton("Cancel")
+        self.rom_manager_unhide_button = QPushButton("Unhide Selected via .gsrollback")
+        self.rom_manager_unhide_button.clicked.connect(self.run_rom_manager_unhide)
+        self.cancel_rom_hide_button = QPushButton("Cancel overlay build")
         self.cancel_rom_hide_button.setEnabled(False)
         self.cancel_rom_hide_button.clicked.connect(self.cancel_rom_hide_workspace)
         custom_actions.addWidget(self.rom_hide_button)
+        custom_actions.addWidget(self.rom_manager_unhide_button)
         custom_actions.addWidget(self.cancel_rom_hide_button)
         custom_layout.addLayout(custom_actions)
         self.rom_hide_result = QTextEdit()
         self.rom_hide_result.setReadOnly(True)
-        self.rom_hide_result.setMinimumHeight(140)
-        self.rom_hide_result.setMaximumHeight(260)
+        self.rom_hide_result.setMinimumHeight(130)
+        self.rom_hide_result.setMaximumHeight(240)
         custom_layout.addWidget(self.rom_hide_result)
         customise_page_layout.addWidget(custom_group)
 
@@ -1312,6 +1393,14 @@ class RecoveryTab(QWidget):
         apply_rollback_row.addWidget(self.custom_apply_rollback, 1)
         apply_rollback_row.addWidget(apply_rollback_button)
         apply_layout.addLayout(apply_rollback_row)
+
+        self.custom_legacy_rollback = QCheckBox(
+            "Explicit legacy rollback-v1/v2 recovery (semantic inverse proof still mandatory)"
+        )
+        self.custom_legacy_rollback.setToolTip(
+            "Use only for alpha13-alpha16 rollback archives. Normal alpha17 rollback-v3 does not need this."
+        )
+        apply_layout.addWidget(self.custom_legacy_rollback)
 
         apply_actions = QHBoxLayout()
         self.custom_apply_button = QPushButton("Preflight + Apply Tiny Overlay to TEST Card")
@@ -1922,6 +2011,205 @@ class RecoveryTab(QWidget):
             self.repair_workspace_worker.deleteLater()
             self.repair_workspace_worker = None
 
+    def select_rom_manager_target(self):
+        path = QFileDialog.getExistingDirectory(self, "Select mounted TEST/CLONE GameStick card root")
+        if path:
+            self.rom_manager_target.setText(path)
+            if hasattr(self, "custom_apply_target"):
+                self.custom_apply_target.setText(path)
+
+    def clear_rom_manager_target(self):
+        self.rom_manager_target.clear()
+        self.rom_manager_hidden_only.setChecked(False)
+        self.rom_manager_summary.setText("Target cleared. Refresh to browse the healthy reference catalogue only.")
+
+    def run_rom_manager_scan(self):
+        image = self.rom_hide_image_path.text().strip()
+        if not image:
+            QMessageBox.warning(self, "Reference image required", "Select the healthy/reference GameStick image first.")
+            return
+        if self.rom_manager_worker is not None and self.rom_manager_worker.isRunning():
+            return
+        target = self.rom_manager_target.text().strip() or None
+        self.rom_manager_summary.setText("Loading verified launcher catalogues...")
+        self.rom_manager_scan_button.setEnabled(False)
+        self.cancel_rom_manager_scan_button.setEnabled(True)
+        self.rom_manager_worker = RomManagerScanThread(image, target)
+        self.rom_manager_worker.progress.connect(self.rom_manager_summary.setText)
+        self.rom_manager_worker.succeeded.connect(self._rom_manager_scan_success)
+        self.rom_manager_worker.failed.connect(self._rom_manager_scan_failure)
+        self.rom_manager_worker.finished.connect(self._rom_manager_scan_finished)
+        self.rom_manager_worker.start()
+
+    def cancel_rom_manager_scan(self):
+        if self.rom_manager_worker is not None and self.rom_manager_worker.isRunning():
+            self.rom_manager_worker.requestInterruption()
+            self.cancel_rom_manager_scan_button.setEnabled(False)
+            self.rom_manager_summary.setText("Cancellation requested...")
+
+    def _rom_manager_scan_success(self, snapshot):
+        self.rom_manager_entries = snapshot.entries
+        if snapshot.target_root:
+            unreadable = ", ".join(snapshot.unreadable_catalogues) if snapshot.unreadable_catalogues else "none"
+            self._rom_manager_summary_base = (
+                f"Reference ROMs: {snapshot.reference_entry_count:,} | "
+                f"Visible: {snapshot.visible_count:,} | Hidden: {snapshot.hidden_count:,} | "
+                f"Inconsistent: {snapshot.inconsistent_count:,} | Target-only: {snapshot.target_only_count:,} | "
+                f"Unreadable catalogues: {unreadable}"
+            )
+        else:
+            self._rom_manager_summary_base = (
+                f"Reference ROMs: {snapshot.reference_entry_count:,} | No target selected — state shown as REFERENCE."
+            )
+        self.rom_manager_summary.setText(self._rom_manager_summary_base)
+        self._refresh_rom_manager_view()
+
+    def _rom_manager_scan_failure(self, message: str):
+        self.rom_manager_entries = ()
+        self.rom_manager_tree.clear()
+        self._rom_manager_summary_base = "ROM Manager scan failed."
+        self.rom_manager_summary.setText(self._rom_manager_summary_base)
+        self.rom_hide_result.setPlainText("ROM MANAGER SCAN FAILED\n\n" + message)
+        QMessageBox.warning(self, "ROM Manager stopped", message)
+
+    def _rom_manager_scan_finished(self):
+        self.rom_manager_scan_button.setEnabled(True)
+        self.cancel_rom_manager_scan_button.setEnabled(False)
+        if self.rom_manager_worker is not None:
+            self.rom_manager_worker.deleteLater()
+            self.rom_manager_worker = None
+
+    def _refresh_rom_manager_view(self):
+        if not hasattr(self, "rom_manager_tree"):
+            return
+        query = self.rom_manager_search.text().strip().casefold() if hasattr(self, "rom_manager_search") else ""
+        hidden_only = self.rom_manager_hidden_only.isChecked() if hasattr(self, "rom_manager_hidden_only") else False
+        selected_identity = None
+        current = self.rom_manager_tree.selectedItems()
+        if current:
+            selected_identity = (current[0].text(0), current[0].text(1).casefold())
+        self.rom_manager_tree.clear()
+        shown = 0
+        total_matches = 0
+        display_limit = 1000
+        for entry in self.rom_manager_entries:
+            if hidden_only and entry.state != "HIDDEN":
+                continue
+            haystack = f"{entry.catalogue_code}:{entry.filename}".casefold()
+            if query and query not in haystack:
+                continue
+            total_matches += 1
+            if shown >= display_limit:
+                continue
+            item = QTreeWidgetItem([entry.catalogue_code, entry.filename, entry.state])
+            item.setData(0, Qt.UserRole, entry.catalogue_code)
+            item.setData(1, Qt.UserRole, entry.filename)
+            self.rom_manager_tree.addTopLevelItem(item)
+            if selected_identity == (entry.catalogue_code, entry.filename.casefold()):
+                self.rom_manager_tree.setCurrentItem(item)
+            shown += 1
+        summary = self._rom_manager_summary_base
+        if total_matches > display_limit:
+            summary += f" | Showing first {display_limit:,} of {total_matches:,} matches — type to narrow."
+        elif query or hidden_only:
+            summary += f" | Matching rows: {total_matches:,}."
+        self.rom_manager_summary.setText(summary)
+
+    def _selected_rom_identity(self):
+        items = self.rom_manager_tree.selectedItems()
+        if len(items) != 1:
+            return None
+        item = items[0]
+        return item.text(0), item.text(1), item.text(2)
+
+    def _rom_manager_selection_changed(self):
+        selected = self._selected_rom_identity()
+        if not selected:
+            return
+        code, filename, state = selected
+        safe_name = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in Path(filename).stem)[:80]
+        image = self.rom_hide_image_path.text().strip()
+        if image:
+            suggested = Path(image).resolve().parent / f"gamestick_hide_{code}_{safe_name}.gscustom"
+            self.rom_hide_output.setText(str(suggested))
+        self.rom_hide_result.setPlainText(
+            f"Selected: {code}:{filename}\nState: {state}\n\n"
+            "Hide creates a tiny launcher-control overlay. Unhide uses the matching rollback archive from a prior apply."
+        )
+
+    def run_rom_manager_unhide(self):
+        selected = self._selected_rom_identity()
+        if not selected:
+            QMessageBox.warning(self, "ROM required", "Select one ROM in the manager first.")
+            return
+        code, filename, state = selected
+        if state != "HIDDEN":
+            QMessageBox.warning(self, "ROM is not hidden", f"{code}:{filename} is currently {state}, not HIDDEN.")
+            return
+        target = self.rom_manager_target.text().strip()
+        if not target:
+            QMessageBox.warning(self, "Target required", "Select the mounted TEST/CLONE card and refresh the manager first.")
+            return
+        start = self.custom_apply_rollback.text().strip() if hasattr(self, "custom_apply_rollback") else ""
+        rollback, _ = QFileDialog.getOpenFileName(
+            self, "Select matching rollback archive", start, "GameStick Rollback (*.gsrollback);;All Files (*)"
+        )
+        if not rollback:
+            return
+        receipt = Path(rollback).with_suffix(".apply.json")
+        if not receipt.is_file():
+            QMessageBox.warning(
+                self,
+                "Matching receipt required",
+                "The rollback's .apply.json receipt is required so the backend can verify rollback SHA-256, ROM identity and target provenance.",
+            )
+            return
+        try:
+            verify_rollback_receipt_for_rom(rollback, receipt, target, code, filename)
+        except Exception as exc:
+            QMessageBox.warning(self, "Rollback provenance check failed", str(exc))
+            return
+        drive = Path(target).drive.upper() or Path(target).name
+        phrase = f"ROLL BACK {drive}"
+        typed, ok = QInputDialog.getText(
+            self,
+            "Confirm selected-ROM unhide",
+            f"Restore the bounded launcher-control bytes for {code}:{filename}.\n\nType exactly: {phrase}",
+        )
+        if not ok:
+            return
+        self.rom_hide_result.setPlainText(f"Validating rollback state for {code}:{filename}...")
+        self.rom_manager_unhide_button.setEnabled(False)
+        self.rom_manager_rollback_worker = CustomRollbackThread(rollback, target, confirmation=typed, receipt_path=str(receipt), expected_rom=(code, filename))
+        self.rom_manager_rollback_worker.progress.connect(self.rom_hide_result.setPlainText)
+        self.rom_manager_rollback_worker.succeeded.connect(self._rom_manager_unhide_success)
+        self.rom_manager_rollback_worker.failed.connect(self._rom_manager_unhide_failure)
+        self.rom_manager_rollback_worker.finished.connect(self._rom_manager_unhide_finished)
+        self.rom_manager_rollback_worker.start()
+
+    def _rom_manager_unhide_success(self, result):
+        self.rom_hide_result.setPlainText(
+            "ROM UNHIDDEN / ROLLBACK VERIFIED\n"
+            f"Target: {result.target_root}\n"
+            f"Restored files / ranges: {result.restored_file_count} / {result.restored_range_count}\n"
+            f"Restored bytes: {_fmt_bytes(result.restored_bytes)}\n"
+            f"Verification: {result.verification}"
+        )
+        QMessageBox.information(self, "ROM restored", "The selected hide operation was rolled back and reread-verified.")
+
+    def _rom_manager_unhide_failure(self, message: str):
+        self.rom_hide_result.setPlainText("ROM UNHIDE FAILED\n\n" + message)
+        QMessageBox.warning(self, "ROM unhide stopped", message)
+
+    def _rom_manager_unhide_finished(self):
+        self.rom_manager_unhide_button.setEnabled(True)
+        if self.rom_manager_rollback_worker is not None:
+            self.rom_manager_rollback_worker.deleteLater()
+            self.rom_manager_rollback_worker = None
+        # Refresh target state so HIDDEN becomes VISIBLE immediately after a successful rollback.
+        if self.rom_hide_image_path.text().strip() and self.rom_manager_target.text().strip():
+            self.run_rom_manager_scan()
+
     def select_rom_hide_image(self):
         path, _ = QFileDialog.getOpenFileName(
             self,
@@ -1932,8 +2220,12 @@ class RecoveryTab(QWidget):
         if path:
             self.rom_hide_image = path
             self.rom_hide_image_path.setText(path)
-            if not self.rom_hide_output.text().strip():
-                self.rom_hide_output.setText(str(Path(path).resolve().parent / "gamestick_custom_hide.gscustom"))
+            if hasattr(self, "custom_apply_source"):
+                self.custom_apply_source.setText(path)
+            self.rom_manager_entries = ()
+            if hasattr(self, "rom_manager_tree"):
+                self.rom_manager_tree.clear()
+                self.rom_manager_summary.setText("Reference selected. Click Load / Refresh ROM Manager.")
 
     def select_rom_hide_output(self):
         suggested = self.rom_hide_output.text().strip() or "gamestick_custom_hide.gscustom"
@@ -1947,17 +2239,23 @@ class RecoveryTab(QWidget):
 
     def run_rom_hide_workspace(self):
         image = self.rom_hide_image_path.text().strip()
-        query = self.rom_hide_query.text().strip()
-        output = self.rom_hide_output.text().strip()
+        selected = self._selected_rom_identity()
         if not image:
             QMessageBox.warning(self, "Image required", "Select the healthy/reference GameStick image first.")
             return
-        if not query:
-            QMessageBox.warning(self, "ROM required", "Enter an existing ROM filename or distinctive title fragment.")
+        if not selected:
+            QMessageBox.warning(self, "ROM required", "Load the ROM Manager and select exactly one ROM first.")
             return
+        code, filename, state = selected
+        if state in ("HIDDEN", "INCONSISTENT", "UNREADABLE", "TARGET_ONLY"):
+            QMessageBox.warning(self, "ROM state is not eligible", f"{code}:{filename} is {state}. Refresh/repair that state before hiding it.")
+            return
+        query = f"{code}:{filename}"
+        output = self.rom_hide_output.text().strip()
         if not output:
-            QMessageBox.warning(self, "Workspace required", "Choose a .gscustom output first.")
-            return
+            safe_name = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in Path(filename).stem)[:80]
+            output = str(Path(image).resolve().parent / f"gamestick_hide_{code}_{safe_name}.gscustom")
+            self.rom_hide_output.setText(output)
         overwrite = False
         if Path(output).exists():
             answer = QMessageBox.question(
@@ -2002,8 +2300,16 @@ class RecoveryTab(QWidget):
             f"Workspace: {result.workspace_path}\n"
             f"SHA-256: {result.workspace_sha256}\n"
             "Source image modified: NO\n"
-            "Physical ROM payload removed: NO"
+            "Physical ROM payload removed: NO\n\n"
+            "The Apply section below has been prefilled for the selected TEST/CLONE card."
         )
+        if hasattr(self, "custom_apply_source"):
+            self.custom_apply_source.setText(self.rom_hide_image_path.text().strip())
+            self.custom_apply_workspace.setText(result.workspace_path)
+            target = self.rom_manager_target.text().strip()
+            if target:
+                self.custom_apply_target.setText(target)
+            self.custom_apply_rollback.setText(str(Path(result.workspace_path).with_suffix(".gsrollback")))
         QMessageBox.information(
             self,
             "Hide-ROM overlay created",
@@ -2077,17 +2383,30 @@ class RecoveryTab(QWidget):
         if not ok:
             return
         overwrite = False
+        overwrite_receipt = False
+        receipt_path = Path(rollback).with_suffix(".apply.json")
         if Path(rollback).exists():
             answer = QMessageBox.question(
                 self,
                 "Existing rollback archive",
-                "Replace the existing host-side rollback archive?\n\nThe target card has not been modified yet.",
+                "Replace the existing host-side rollback archive?\n\nThis authorises replacement of that rollback artifact only; the target card has not been modified yet.",
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.No,
             )
             if answer != QMessageBox.Yes:
                 return
             overwrite = True
+        if receipt_path.exists():
+            answer = QMessageBox.question(
+                self,
+                "Existing apply receipt",
+                "Replace the existing apply receipt transactionally?\n\nThis is separate overwrite authority from the rollback archive.",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                return
+            overwrite_receipt = True
         self.custom_apply_result.setPlainText(
             "Preflighting source image, overlay provenance and mounted TEST card...\nNo target write occurs until every attestation passes."
         )
@@ -2096,7 +2415,7 @@ class RecoveryTab(QWidget):
         self.cancel_custom_apply_button.setEnabled(True)
         self.custom_apply_worker = CustomApplyThread(
             source, workspace, target, rollback,
-            confirmation=typed, overwrite_rollback=overwrite,
+            confirmation=typed, overwrite_rollback=overwrite, overwrite_receipt=overwrite_receipt,
         )
         self.custom_apply_worker.progress.connect(self.custom_apply_result.setPlainText)
         self.custom_apply_worker.succeeded.connect(self._custom_apply_success)
@@ -2124,7 +2443,7 @@ class RecoveryTab(QWidget):
             f"Receipt: {result.receipt_path}\n"
             f"Verification: {result.verification}\n"
             "Physical ROM payload removed: NO\n\n"
-            "Safely eject the TEST card and boot the GameStick. Solitaire should be absent from the launcher."
+            f"Safely eject the TEST card and boot the GameStick. {result.catalogue_code}:{result.rom} should be absent from the launcher."
         )
         QMessageBox.information(
             self,
@@ -2144,6 +2463,8 @@ class RecoveryTab(QWidget):
         if self.custom_apply_worker is not None:
             self.custom_apply_worker.deleteLater()
             self.custom_apply_worker = None
+        if self.rom_hide_image_path.text().strip() and self.rom_manager_target.text().strip():
+            self.run_rom_manager_scan()
 
     def run_custom_rollback(self):
         rollback = self.custom_apply_rollback.text().strip()
@@ -2156,7 +2477,7 @@ class RecoveryTab(QWidget):
         typed, ok = QInputDialog.getText(
             self,
             "Confirm bounded rollback",
-            "This restores only the original byte ranges captured before the overlay write.\n\n"
+            "This restores only after independently proving the rollback is the exact inverse of one canonical hide.\n\n"
             f"Type exactly: {phrase}",
         )
         if not ok:
@@ -2165,7 +2486,10 @@ class RecoveryTab(QWidget):
         self.custom_apply_button.setEnabled(False)
         self.custom_rollback_button.setEnabled(False)
         self.cancel_custom_apply_button.setEnabled(False)
-        self.custom_rollback_worker = CustomRollbackThread(rollback, target, confirmation=typed)
+        self.custom_rollback_worker = CustomRollbackThread(
+            rollback, target, confirmation=typed,
+            allow_legacy_recovery=self.custom_legacy_rollback.isChecked(),
+        )
         self.custom_rollback_worker.progress.connect(self.custom_apply_result.setPlainText)
         self.custom_rollback_worker.succeeded.connect(self._custom_rollback_success)
         self.custom_rollback_worker.failed.connect(self._custom_apply_failure)
@@ -2188,6 +2512,8 @@ class RecoveryTab(QWidget):
         if self.custom_rollback_worker is not None:
             self.custom_rollback_worker.deleteLater()
             self.custom_rollback_worker = None
+        if self.rom_hide_image_path.text().strip() and self.rom_manager_target.text().strip():
+            self.run_rom_manager_scan()
 
     def select_compare_images(self):
         paths, _ = QFileDialog.getOpenFileNames(

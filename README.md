@@ -1,4 +1,55 @@
-# GameStick Inspector 0.5.0-alpha13.1
+# GameStick Inspector 0.5.0-alpha17
+> **alpha17 opened-handle binding / durable recovery identity:** no new ROM capability. Every already-open target DAT handle is now independently bound to the verified Windows Volume-GUID plus exact relative pathname before write authority is granted. Rollback provenance now separates ephemeral attachment identity (including `PhysicalDriveN`) from durable media identity so a valid recovery archive survives normal Windows re-enumeration without accepting a different card.
+
+## 0.5.0-alpha17 — physical write binding / durable rollback identity
+
+- After opening each target DAT/ROOT file, production Windows code calls `GetFinalPathNameByHandleW(..., VOLUME_NAME_GUID)` and requires the exact verified `\\?\Volume{GUID}\...` path for that specific file before any mutation. Root/physical-disk revalidation remains an additional layer.
+- Apply and rollback use the same opened-handle binding invariant; redirecting only one handle to a bit-identical second clone is refused before the first write.
+- Introduces `gamestick-customization-rollback-v3` and apply-receipt-v2 with separate `attachment_identity_at_apply` and `durable_media_identity` provenance.
+- Durable media identity excludes `disk_number` and transient drive-letter attachment data. It retains media/partition geometry, serial/unique-ID hashes where available, a drive-letter-free partition-layout digest, and stable Volume-GUID identity.
+- Rollback-v1/v2 are explicit legacy recovery only; they still require canonical semantic inverse proof. Where older attachment identity exists, its durable subset is compared rather than demanding the old `PhysicalDriveN`.
+- Exact regressions cover one-handle substitution during apply, one-handle substitution during rollback, same-card different-disk-number recovery, different-media refusal, receipt-bound re-enumeration, and drive-letter-independent durable layout hashing.
+- Raw restore, firmware flashing, formatting/repartitioning and physical ROM payload add/delete remain unavailable.
+- Release validation: **276 passed, 1 Qt smoke test skipped** in the packaging environment.
+
+## 0.5.0-alpha16 — rollback authority / mutation boundary
+
+- Introduces `gamestick-customization-rollback-v2` with mandatory action, workspace SHA-256, ROM identity and physical target provenance.
+- `.gsrollback` no longer grants itself write authority. Current customized controls plus rollback original bytes are used to reconstruct a virtual pre-hide state; Inspector proves exactly one ROM was canonically removed from both `filelist.txt` and `ROOT.DAT/fileinfo.txt`.
+- Canonical rollback topology is independently re-derived and must equal exactly one numbered DAT + `ROOT.DAT`, two ranges each, four ranges total. Unrelated DAT metadata/control changes are refused before writes.
+- General GUI rollback, CLI rollback and ROM Manager unhide all converge on the same semantic-authority backend.
+- Legacy rollback-v1 is disabled by default. It is available only through an explicit legacy-recovery opt-in and still must pass the same semantic inverse proof before write authority.
+- Apply enters the potentially-destructive state immediately before `handle.write(...)`; short writes, write-after-partial exceptions, flush/fsync failures and later verification failures all trigger restoration and reread verification.
+- Exact adversarial regressions cover: arbitrary rollback DAT-byte authority, a 2-file/4-range rollback with one unrelated range, short-write return after partial mutation, and partial-write-then-raise.
+- Raw restore, firmware flashing, formatting/repartitioning and physical ROM payload add/delete remain unavailable.
+- Release validation: **270 passed, 1 Qt smoke test skipped** in the packaging environment.
+
+## 0.5.0-alpha15 — transaction authority / atomicity
+
+- Treats `.gscustom` as a claim, not write authority: apply independently rebuilds the canonical hide operation from the healthy source image and exact ROM identity, then requires an exact two-file/four-range patch-set match. Extra paths/ranges/bytes or a forged ROM identity are rejected before target modification.
+- Destructive customization apply/rollback is production-supported on Windows only. The selected TEST/CLONE is bound to physical disk/partition identity and re-queried after target file handles are opened and immediately before write authority is granted.
+- Rollback and receipt outputs must be on a verified host physical disk different from the target card. Another partition on the same GameStick media is rejected.
+- The `.apply.json` receipt destination is reserved before target modification. Existing receipts are never replaced without explicit overwrite authority. Receipt commit is inside the target transaction; commit failure restores and reread-verifies the original target state.
+- Rollback is transactional: current replacement bytes are captured before restoration. If a later restore fails, already-restored ranges are compensated back to the complete customized state and reread-verified. Failed compensation raises an explicit `RECOVERY REQUIRED` condition.
+- `.gscustom` and `.gsrollback` members are bounded from ZIP metadata before decompression: member count, per-member/aggregate expanded bytes, compression method, encryption, and compression ratio are constrained.
+- ROM Manager case-insensitive lookup reuses bounded forensic directory enumeration rather than materializing an untrusted directory.
+- Backend unhide provenance requires the selected rollback archive SHA-256, exact ROM identity, receipt schema/status, and target identity where available to match.
+- Raw restore, firmware flashing, formatting/repartitioning and physical ROM payload add/delete remain unavailable.
+- Release validation: **265 passed, 1 Qt smoke test skipped** in the packaging environment.
+
+> **alpha14 ROM Manager:** the proven hide-ROM mechanism is now exposed as a fast catalogue browser. Load the healthy reference image, optionally compare a mounted TEST/CLONE card read-only, search exact `CODE:filename` identities, see `VISIBLE` / `HIDDEN` / `INCONSISTENT` state, build a hide overlay for the selected entry, and unhide a selected entry through its matching verified `.gsrollback` + `.apply.json` receipt. No ROM payload is read by the manager and no full-image scan is performed.
+
+## 0.5.0-alpha14 — ROM Manager
+
+- Adds a searchable ROM Manager to the responsive `Customise` workflow page.
+- Reads only the reference FAT plus `filelist.txt` / `fileinfo.txt` launcher controls; ROM payload files are never read.
+- Optional mounted-card comparison is read-only and classifies each exact `catalogue code + filename` identity as `VISIBLE`, `HIDDEN`, `INCONSISTENT`, `UNREADABLE`, or `TARGET_ONLY`.
+- Similar display names remain independent; manager identity is never fuzzy title text alone.
+- `Build Hide Overlay for Selected` feeds the already-proven fixed-slot `.gscustom` builder with an exact `CODE:filename` identity and pre-fills the bounded apply section.
+- `Unhide Selected via .gsrollback` requires the sibling `.apply.json` receipt and refuses a rollback whose recorded ROM identity does not match the selected hidden entry.
+- After bounded apply/rollback, the mounted-card manager refreshes automatically so launcher state is visible immediately.
+- Adds `rom_manager.bat` / `src/rom_manager_cli.py` for fast reference/target inventory and search.
+- Physical ROM add/delete, raw restore, formatting/repartitioning and firmware flashing remain locked.
 
 > **alpha13.1 Windows apply fix:** fixes a Windows-only `[Errno 9] Bad file descriptor` during rollback-archive durability commit. The target is still not written until the host rollback archive is durably committed.
 
@@ -495,6 +546,6 @@ Runtime/dev dependencies are pinned in `requirements.txt` / `requirements-dev.tx
 
 ## Validation
 
-Current suite: **172/172 passing** before the final packaging audit.
+Current suite: **276 passed, 1 skipped** before the final packaging audit.
 
 See `docs/SAFETY.md`, `docs/DESIGN.md` and `docs/ROADMAP.md`.

@@ -34,7 +34,7 @@ def test_main_window_constructs_with_browser_invalidation_slot():
     window = MainWindow()
     try:
         assert hasattr(BrowserTab, "clear_view")
-        assert "0.5.0-alpha12.1" in window.windowTitle()
+        assert "0.5.0-alpha15" in window.windowTitle()
     finally:
         window.close()
         app.processEvents()
@@ -57,3 +57,13 @@ def test_recovery_ui_is_split_into_scrollable_workflows_statically():
     assert "repair_page_layout.addWidget(repair_group)" in source
     assert "customise_page_layout.addWidget(custom_group)" in source
     assert "advanced_layout.addWidget(compare_group)" in source
+
+
+def test_rom_manager_ui_is_present_statically():
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "src" / "gamestick" / "ui.py").read_text(encoding="utf-8")
+    assert 'QGroupBox("ROM Manager — browse/search + exact launcher state")' in source
+    assert 'QPushButton("Load / Refresh ROM Manager")' in source
+    assert 'QPushButton("Build Hide Overlay for Selected")' in source
+    assert 'QPushButton("Unhide Selected via .gsrollback")' in source
+    assert 'self.rom_manager_tree.setHeaderLabels(["Code", "ROM filename", "State"])' in source

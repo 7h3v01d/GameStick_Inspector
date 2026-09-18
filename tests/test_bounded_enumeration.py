@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from contextlib import AbstractContextManager
 from pathlib import Path
 
@@ -378,3 +380,18 @@ def test_browser_ui_contains_visible_enumeration_error_marker():
     root = Path(__file__).resolve().parents[1]
     ui = (root / "src" / "gamestick" / "ui.py").read_text(encoding="utf-8")
     assert "[unable to enumerate directory:" in ui
+
+
+def test_rom_manager_casefold_resolution_uses_bounded_scandir(monkeypatch, tmp_path):
+    import gamestick.rom_manager as rom_manager
+    from gamestick.fs_safety import BoundedScandirResult
+
+    parent = tmp_path / "root"
+    parent.mkdir()
+    monkeypatch.setattr(
+        rom_manager,
+        "bounded_scandir_names",
+        lambda _parent, limit: BoundedScandirResult(names=["x"] * limit, truncated=True, enumerated=limit + 1),
+    )
+    with pytest.raises(rom_manager.RomManagerError, match="safety bound"):
+        rom_manager._resolve_casefold_child(parent, "ROOT.DAT")

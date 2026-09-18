@@ -18,18 +18,26 @@ def main() -> int:
     apply_p = sub.add_parser("apply", help="Apply a .gscustom overlay to a mounted test clone")
     apply_p.add_argument("source_image", help="Healthy reference .img used to build the workspace")
     apply_p.add_argument("workspace", help="Host-side .gscustom workspace")
-    apply_p.add_argument("target_root", help=r"Mounted target GameStick root, e.g. H:\")
+    apply_p.add_argument("target_root", help="Mounted target GameStick root, e.g. H:\\")
     apply_p.add_argument("rollback", help="Host-side .gsrollback output (must not be on target card)")
     apply_p.add_argument("--overwrite-rollback", action="store_true")
+    apply_p.add_argument("--overwrite-receipt", action="store_true", help="Explicitly replace an existing .apply.json receipt")
 
     rollback_p = sub.add_parser("rollback", help="Restore original control bytes from .gsrollback")
     rollback_p.add_argument("rollback", help="Host-side .gsrollback archive")
-    rollback_p.add_argument("target_root", help=r"Mounted target GameStick root, e.g. H:\")
+    rollback_p.add_argument("target_root", help="Mounted target GameStick root, e.g. H:\\")
+    rollback_p.add_argument("--receipt", help="Bound .apply.json receipt for provenance-checked rollback")
+    rollback_p.add_argument("--catalogue-code", help="Expected three-digit catalogue code when --receipt is used")
+    rollback_p.add_argument("--rom", help="Expected exact ROM filename when --receipt is used")
+    rollback_p.add_argument(
+        "--legacy-recovery", action="store_true",
+        help="Explicitly allow rollback-v1/v2 recovery; canonical semantic inverse proof still applies",
+    )
 
     args = parser.parse_args()
     if args.command == "apply":
         phrase = expected_confirmation(args.target_root)
-        print("WARNING: this is the first bounded write path. Use a TEST/CLONE GameStick card only.")
+        print("WARNING: this is a bounded write path. Use a TEST/CLONE GameStick card only.")
         print("No ROM payload is deleted; only pre-attested launcher-control byte ranges are overwritten.")
         print(f"Type exactly: {phrase}")
         typed = input("> ")
@@ -40,6 +48,7 @@ def main() -> int:
             args.rollback,
             confirmation=typed,
             overwrite_rollback=args.overwrite_rollback,
+            overwrite_receipt=args.overwrite_receipt,
             progress=lambda message: print(message, flush=True),
         )
         print("\nCUSTOMISATION APPLIED AND VERIFIED")
@@ -52,6 +61,9 @@ def main() -> int:
         print(f"Verification: {result.verification}")
         return 0
 
+    provenance_values = (args.receipt, args.catalogue_code, args.rom)
+    if any(provenance_values) and not all(provenance_values):
+        parser.error("rollback provenance requires --receipt, --catalogue-code, and --rom together")
     phrase = f"ROLL BACK {__import__('pathlib').Path(args.target_root).drive.upper() or __import__('pathlib').Path(args.target_root).name}"
     print(f"Type exactly: {phrase}")
     typed = input("> ")
@@ -59,6 +71,9 @@ def main() -> int:
         args.rollback,
         args.target_root,
         confirmation=typed,
+        receipt_path=args.receipt,
+        expected_rom=(args.catalogue_code, args.rom) if args.receipt else None,
+        allow_legacy_recovery=args.legacy_recovery,
         progress=lambda message: print(message, flush=True),
     )
     print("\nCUSTOMISATION ROLLED BACK AND VERIFIED")
